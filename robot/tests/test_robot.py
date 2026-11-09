@@ -1,5 +1,6 @@
 import asyncio
 import json
+import math
 import struct
 import threading
 import time
@@ -974,3 +975,153 @@ async def test_bind_retries_until_the_address_is_available():
     )
     assert port == 4321
     assert fake.attempts == 3
+
+
+# ---- LiDAR scan frames (PROTO-2, T13) ----
+
+
+def _scan(points, t_ns=5_000_000_000) -> hardware.LidarScan:
+    return hardware.LidarScan(
+        t_ns, tuple(hardware.LidarPoint(t_ns, math.radians(deg), m, 100, 0) for deg, m in points)
+    )
+
+
+def _decode_scan(frame: bytes):
+    kind, ver, seq, t_ms = struct.unpack_from("<BBIQ", frame)
+    return kind, ver, seq, t_ms, struct.unpack_from("<360H", frame, 14)
+
+
+def test_scan_frame_header_size_and_bins():
+    frame = server.build_scan_frame(_scan([(0, 1.5), (90, 2.0), (359, 0.25)]), seq=7)
+    assert len(frame) == server.SCAN_FRAME_SIZE == 14 + 720
+    assert server.SCAN_HEADER.format == "<BBIQ"
+    kind, ver, seq, t_ms, ranges = _decode_scan(frame)
+    assert (kind, ver, seq, t_ms) == (server.SCAN_FRAME_TYPE, server.SCAN_FRAME_VER, 7, 5000)
+    assert ranges[0] == 1500 and ranges[90] == 2000 and ranges[359] == 250
+    assert sum(1 for r in ranges if r) == 3  # every other bin means "no point"
+
+
+def test_scan_frame_keeps_the_nearest_point_per_bin():
+    frame = server.build_scan_frame(_scan([(10.2, 3.0), (9.8, 1.0), (10, 2.0)]), seq=1)
+    assert _decode_scan(frame)[4][10] == 1000
+
+
+def test_scan_frame_empty_and_invalid_points():
+    empty = _decode_scan(server.build_scan_frame(_scan([]), seq=1))
+    assert set(empty[4]) == {0}
+    bad = _scan([(5, 0.0), (6, -1.0), (7, math.nan), (8, math.inf), (9, 100.0)])
+    ranges = _decode_scan(server.build_scan_frame(bad, seq=1))[4]
+    assert ranges[5:9] == (0, 0, 0, 0)
+    assert ranges[9] == 0xFFFF  # clamped to u16
+
+
+def test_scan_frame_wraps_angles_and_sequence():
+    ranges = _decode_scan(server.build_scan_frame(_scan([(360, 1.0), (-1, 2.0)]), seq=2**32 + 3))
+    assert ranges[4][0] == 1000 and ranges[4][359] == 2000 and ranges[2] == 3
+
+
+def test_sim_lidar_scene_is_recognisable():
+    now = [0]
+    lidar = sim.SimulatedLidar(period_s=0.1, clock_ns=lambda: now[0])
+    lidar.start()
+    now[0] = 150_000_000
+    scan = lidar.latest
+    assert scan is not None and len(scan.points) == 360
+    ranges = _decode_scan(server.build_scan_frame(scan, 1))[4]
+    assert all(r > 0 for r in ranges)
+    assert len(set(ranges)) > 100  # walls, a box and a pillar, not a constant ring
+
+
+class _FakeLidar:
+    def __init__(self) -> None:
+        self.latest = None
+        self.n = 0
+
+    def publish(self) -> None:
+        self.n += 1
+        self.latest = _scan([(0, 1.0 + self.n / 1000.0)], t_ns=self.n * 1_000_000)
+
+
+async def _scan_rig(lidar) -> Rig:
+    stm = sim.SimulatedStm32()
+    stm.start()
+    srv = server.RobotServer(
+        token=TOKEN, writer=FakeWriter(), stm=stm, devices=_devices_ok, lidar=lidar
+    )
+    return Rig(srv, srv.writer, stm, await srv.start("127.0.0.1", 0))
+
+
+async def test_scan_frames_are_sent_only_for_new_scans_at_most_10_hz():
+    lidar = _FakeLidar()
+    made = await _scan_rig(lidar)
+    try:
+        async with made.connect() as ws:
+            await asyncio.sleep(0.2)  # no scan yet: nothing but states
+            lidar.publish()
+            stop = False
+
+            async def produce():
+                while not stop:
+                    lidar.publish()  # far faster than the allowed rate
+                    await asyncio.sleep(0.004)
+
+            producer = asyncio.ensure_future(produce())
+            frames, started = [], time.monotonic()
+            try:
+                while time.monotonic() - started < 1.0:
+                    message = await asyncio.wait_for(ws.recv(), 1.0)
+                    if isinstance(message, bytes):
+                        frames.append(_decode_scan(message))
+            finally:
+                stop = True
+                await asyncio.gather(producer, return_exceptions=True)
+            assert 5 <= len(frames) <= 11
+            seqs = [f[2] for f in frames]
+            assert seqs == list(range(1, len(frames) + 1))
+            assert [f[3] for f in frames] == sorted({f[3] for f in frames})  # newest, no repeats
+    finally:
+        await made.srv.close()
+        made.stm.stop()
+
+
+async def test_no_scan_frames_without_a_new_scan():
+    lidar = _FakeLidar()
+    lidar.publish()
+    made = await _scan_rig(lidar)
+    try:
+        async with made.connect() as ws:
+            kinds = []
+            started = time.monotonic()
+            while time.monotonic() - started < 0.5:
+                kinds.append(type(await asyncio.wait_for(ws.recv(), 1.0)))
+            assert kinds.count(bytes) == 1  # the one existing scan, sent once
+    finally:
+        await made.srv.close()
+        made.stm.stop()
+
+
+async def test_slow_scan_peer_does_not_block_command_intake():
+    lidar = _FakeLidar()
+    made = await _scan_rig(lidar)
+    try:
+        async with made.connect() as slow, made.connect() as fast:
+            # `slow` is replaced by `fast` (newest connection wins); commands still go through
+            # while scans keep being produced and nobody reads.
+            stop = False
+
+            async def produce():
+                while not stop:
+                    lidar.publish()
+                    await asyncio.sleep(0.01)
+
+            producer = asyncio.ensure_future(produce())
+            try:
+                await asyncio.sleep(0.3)
+                await fast.send(_cmd(seq=9))
+                await wait_for(lambda: made.writer.calls)
+            finally:
+                stop = True
+                await asyncio.gather(producer, return_exceptions=True)
+    finally:
+        await made.srv.close()
+        made.stm.stop()

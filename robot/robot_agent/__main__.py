@@ -209,6 +209,7 @@ async def run(config: Config) -> None:
         writer=writer,
         stm=stm,
         devices=lambda: {"stm": stm.health(), "lidar": lidar.health()},
+        lidar=lidar,
     )
     if not config.motion_enabled:
         log.warning("ROBOT_MOTION_ENABLED is false: only zero velocity will be written")

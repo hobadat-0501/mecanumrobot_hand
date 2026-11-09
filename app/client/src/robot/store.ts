@@ -16,10 +16,23 @@ import type {
   Source,
   Speed,
 } from "./control";
-import { encodeMessage, parseServerMessage, resolveWsUrl } from "./protocol";
-import type { ClientMessage, Role, StateMsg } from "./protocol";
-import { HistoryBuffer, LatencyTracker, STALE_MS, isStale } from "./telemetry";
-import type { LatencyStats } from "./telemetry";
+import {
+  decodeScanFrame,
+  encodeMessage,
+  parseServerMessage,
+  resolveWsUrl,
+} from "./protocol";
+import type { ClientMessage, Role, ScanFrame, StateMsg } from "./protocol";
+import {
+  HistoryBuffer,
+  LatencyTracker,
+  RateMeter,
+  STALE_MS,
+  isStale,
+  scanStats,
+  scanStatus,
+} from "./telemetry";
+import type { LatencyStats, ScanStats, ScanStatus } from "./telemetry";
 
 export const BACKOFF_INITIAL_MS = 500;
 export const BACKOFF_MAX_MS = 5000;
@@ -80,6 +93,11 @@ let shell: ShellSnapshot = INITIAL_SHELL;
 export const trajectory = new HistoryBuffer();
 const latency = new LatencyTracker();
 const STALE_CHECK_MS = 250;
+/** Scan LiDAR mới nhất (T13), ngoài React; tuổi tính từ lúc nhận. */
+let scan: ScanFrame | null = null;
+let scanAt = Number.NEGATIVE_INFINITY;
+const scanRate = new RateMeter();
+const scanListeners = new Set<() => void>();
 const telemetryListeners = new Set<() => void>();
 const shellListeners = new Set<() => void>();
 
@@ -90,6 +108,42 @@ export function subscribeTelemetry(listener: () => void): () => void {
   return () => {
     telemetryListeners.delete(listener);
   };
+}
+
+export function subscribeScan(listener: () => void): () => void {
+  scanListeners.add(listener);
+  return () => {
+    scanListeners.delete(listener);
+  };
+}
+
+/** Scan LiDAR mới nhất; null nếu chưa nhận hoặc kết nối đã đóng. */
+export function getScan(): ScanFrame | null {
+  return scan;
+}
+
+/** performance.now() lúc nhận scan gần nhất; -Infinity nếu chưa có. */
+export function getScanAt(): number {
+  return scanAt;
+}
+
+/** Tuổi scan gần nhất (ms); null nếu chưa có. */
+export function getScanAgeMs(now: number = performance.now()): number | null {
+  return scan === null ? null : now - scanAt;
+}
+
+export interface ScanSummary extends ScanStats {
+  status: ScanStatus;
+  rateHz: number;
+  ageMs: number | null;
+}
+
+/** Số liệu tóm tắt cho trang LiDAR (đọc theo chu kỳ, không render theo từng scan). */
+export function getScanSummary(): ScanSummary {
+  const now = performance.now();
+  const ageMs = getScanAgeMs(now);
+  const stats = scan === null ? { count: 0, nearestMm: null, nearestDeg: null } : scanStats(scan.ranges);
+  return { ...stats, status: scanStatus(ageMs), rateHz: scanRate.rate(now), ageMs };
 }
 
 export function getTelemetry(): StateMsg | null {
@@ -393,7 +447,17 @@ function connect(): void {
     publishShell();
   };
   socket.onmessage = (event: MessageEvent) => {
-    if (ws !== socket || typeof event.data !== "string") return; // khung nhị phân: LiDAR, T13
+    if (ws !== socket) return;
+    if (typeof event.data !== "string") {
+      // Khung nhị phân: scan LiDAR (PROTO-2). Sai định dạng thì bỏ qua.
+      const frame = event.data instanceof ArrayBuffer ? decodeScanFrame(event.data) : null;
+      if (frame === null) return;
+      scan = frame;
+      scanAt = performance.now();
+      scanRate.tick(scanAt);
+      for (const listener of scanListeners) listener();
+      return;
+    }
     const msg = parseServerMessage(event.data);
     if (msg === null) return;
     const couldDrive = canDrive();
@@ -410,6 +474,9 @@ function connect(): void {
     ws = null;
     conn = "closed";
     telemetry = null;
+    scan = null;
+    scanRate.clear();
+    for (const listener of scanListeners) listener();
     notifyTelemetry();
     haltAll("closed");
     scheduleReconnect();

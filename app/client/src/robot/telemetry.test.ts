@@ -1,11 +1,23 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  SCAN_BINS,
+  SCAN_FRAME_BYTES,
+  SCAN_FRAME_TYPE,
+  SCAN_FRAME_VER,
+  SCAN_HEADER_BYTES,
+  decodeScanFrame,
+} from "./protocol";
+import {
   HistoryBuffer,
   LatencyTracker,
+  RateMeter,
+  SCAN_STALE_MS,
   isStale,
   parseDeviceHealth,
   percentile,
+  scanStats,
+  scanStatus,
   STALE_MS,
 } from "./telemetry";
 
@@ -140,5 +152,70 @@ describe("parseDeviceHealth", () => {
   it("thiếu dữ liệu", () => {
     expect(parseDeviceHealth(undefined).ok).toBeNull();
     expect(parseDeviceHealth([1]).errors).toBeNull();
+  });
+});
+
+describe("khung scan LiDAR (PROTO-2)", () => {
+  function frame(over: { type?: number; ver?: number; seq?: number; ms?: number; len?: number } = {}) {
+    const buf = new ArrayBuffer(over.len ?? SCAN_FRAME_BYTES);
+    const view = new DataView(buf);
+    view.setUint8(0, over.type ?? SCAN_FRAME_TYPE);
+    view.setUint8(1, over.ver ?? SCAN_FRAME_VER);
+    view.setUint32(2, over.seq ?? 7, true);
+    view.setBigUint64(6, BigInt(over.ms ?? 123456789), true);
+    return { buf, view };
+  }
+
+  it("giải mã header và 360 ô little-endian", () => {
+    const { buf, view } = frame();
+    view.setUint16(SCAN_HEADER_BYTES + 0, 1500, true);
+    view.setUint16(SCAN_HEADER_BYTES + 2 * 90, 0x1234, true);
+    view.setUint16(SCAN_HEADER_BYTES + 2 * 359, 65535, true);
+    const out = decodeScanFrame(buf);
+    expect(out).not.toBeNull();
+    expect(out!.seq).toBe(7);
+    expect(out!.tMonoMs).toBe(123456789);
+    expect(out!.ranges.length).toBe(SCAN_BINS);
+    expect([out!.ranges[0], out!.ranges[90], out!.ranges[359], out!.ranges[1]]).toEqual([
+      1500, 0x1234, 65535, 0,
+    ]);
+  });
+
+  it("bỏ qua khung sai loại, sai phiên bản, sai kích thước", () => {
+    expect(decodeScanFrame(frame({ type: 1 }).buf)).toBeNull();
+    expect(decodeScanFrame(frame({ ver: 2 }).buf)).toBeNull();
+    expect(decodeScanFrame(frame({ len: SCAN_FRAME_BYTES - 1 }).buf)).toBeNull();
+    expect(decodeScanFrame(frame({ len: SCAN_FRAME_BYTES + 2 }).buf)).toBeNull();
+    expect(decodeScanFrame(new ArrayBuffer(0))).toBeNull();
+    expect(decodeScanFrame("x" as unknown as ArrayBuffer)).toBeNull();
+  });
+});
+
+describe("thống kê scan và tuổi dữ liệu", () => {
+  it("scanStats: đếm ô có điểm, tìm ô gần nhất, bỏ ô 0", () => {
+    const ranges = new Uint16Array(SCAN_BINS);
+    expect(scanStats(ranges)).toEqual({ count: 0, nearestMm: null, nearestDeg: null });
+    ranges[10] = 2000;
+    ranges[200] = 800;
+    ranges[300] = 800;
+    expect(scanStats(ranges)).toEqual({ count: 3, nearestMm: 800, nearestDeg: 200 });
+  });
+
+  it("scanStatus: none, live, stale theo ngưỡng", () => {
+    expect(scanStatus(null)).toBe("none");
+    expect(scanStatus(0)).toBe("live");
+    expect(scanStatus(SCAN_STALE_MS)).toBe("live");
+    expect(scanStatus(SCAN_STALE_MS + 1)).toBe("stale");
+  });
+
+  it("RateMeter: đo Hz, về 0 khi ngừng", () => {
+    const meter = new RateMeter(2000);
+    expect(meter.rate(0)).toBe(0);
+    for (let i = 0; i <= 10; i++) meter.tick(i * 100);
+    expect(meter.rate(1000)).toBeCloseTo(10, 5);
+    expect(meter.rate(1500)).toBeCloseTo(10, 5);
+    expect(meter.rate(2500)).toBe(0); // mẫu cuối đã cũ hơn nửa cửa sổ
+    meter.clear();
+    expect(meter.rate(1000)).toBe(0);
   });
 });
