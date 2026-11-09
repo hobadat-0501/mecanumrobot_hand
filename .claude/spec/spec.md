@@ -33,7 +33,7 @@ Quy ước mã: `FR` chức năng, `SAF` an toàn, `FIX` lỗi code cũ, `PROTO`
 
 | Mã | Yêu cầu | Task |
 |---|---|---|
-| SAF-01 | Hệ số 1.89: `cmd_vel` chia 1.89 cả ba thành phần, **chỉ tại một hàm** trong `app/server/app_server/control.py`. Telemetry vận tốc `vx, vy, wz` nhân lại 1.89 ở `telemetry.py` (A-1), dùng cùng một hằng số. Hằng số không có trong client, không có trong payload nào tới web, không hiện trên UI. Web luôn thấy đơn vị trước khi chia. | T05, T06, T08, T14 |
+| SAF-01 | Không có hệ số quy đổi: `cmd_vel` đi từ web xuống STM và telemetry đi ngược lại đều giữ nguyên giá trị (đã bỏ hệ số 1.89 cũ). Không hằng số nhân/chia nào trong `control.py`, `telemetry.py`, client hay payload. | T05, T06, T08, T14 |
 | SAF-02 | Mặc định disarm. App server khởi động ở disarm. Robot có `ROBOT_MOTION_ENABLED` mặc định `false`; khi `false` chỉ ghi vận tốc 0. Arm là trạng thái của app server, kết thúc ở đó, không gửi xuống robot. Mất link robot thì tự disarm; không arm được khi link đang mất. | T03, T05, T06, T14 |
 | SAF-03 | Chuỗi tự dừng: (a) web thả phím, mất focus cửa sổ, ẩn tab thì gửi 0 và hủy chạy tự động; (b) app server không nhận lệnh 250 ms, hoặc operator ngắt kết nối, hoặc disarm thì gửi `cmd_vel` 0; (c) robot không nhận lệnh 250 ms hoặc mất link thì tự ghi 0. Lệnh đã hết hạn không được chạy lại khi link phục hồi. | T03, T04, T06, T08, T14 |
 | SAF-04 | Không đặt giới hạn tốc độ phần mềm ở bất kỳ tầng nào (quyết định của người dùng). App server và robot vẫn loại giá trị không hữu hạn; giá trị vượt phạm vi `int16` của khung STM32 bị loại, không kẹp, và gửi 0 thay thế. | T03, T05, T08, T14 |
@@ -76,7 +76,7 @@ Bánh A, B, C, D với `ε = (+,−,+,−)`, `s = (−,−,+,+)` (theo `docs/dyn
 | PHY-4 | Thân sang thế giới: `ẋ = vx·cosθ − vy·sinθ`, `ẏ = vx·sinθ + vy·cosθ`, `θ̇ = wz`; `ω̇` là đạo hàm có lọc của wz. | T07, T10 |
 | PHY-5 | Động lực học: gia tốc từ vận tốc đo, lọc thông thấp bậc 1 `τ = 0.1 s`; `a_x = v̇x − wz·vy`, `a_y = v̇y + wz·vx`; `Fx = m·a_x`, `Fy = m·a_y`, `Mz = I_z·ẇz`; `F_d,i = (Fx + ε_i·Fy + s_i·Mz/lever)/4`; `F_c = μ_r·m·g/4`; `τ_i = r·(F_d,i + F_c·sign(ω_i))`. Test: `a = (1, 0)`, `ω_i > 0` → `F_d = 2.425`, `τ ≈ 0.1807`. | T07, T12 |
 | PHY-6 | Bộ bám đích trên client, 20 Hz, chỉ xuất `cmd_vel`: sai số thế giới quay về thân, `v = 1.0·e`, `wz = 1.5·e_θ` (e_θ quấn về `[−π, π]`), chỉ giới hạn theo tốc độ chạy, giữ hướng vector; tăng/giảm tốc do firmware STM đảm nhiệm nên client không nhập, không giới hạn và không làm trơn gia tốc. Người dùng chỉ nhập đích và thời gian mong muốn T; tốc độ chạy suy ra: `vCruise = |quãng đường|/T`, `wzCruise = |góc|/T` (mặc định 0.2 m/s, 1.0 rad/s khi quãng đường hoặc góc bằng 0), tốc độ thân và bốn bánh hiển thị tức thời từ quãng đường/T qua PHY-2; không chặn trên. Xong khi `\|e\| < 0.02` m, `\|e_θ\| < 0.035` rad trong 3 chu kỳ. Hủy khi state cũ hơn 500 ms, disarm, có phím di chuyển hoặc quá `3·T_dự_kiến + 5` s. Kiểu A quy đổi: `x_g = x0 + s·cos(θ0+α)`, `y_g = y0 + s·sin(θ0+α)`, `θ_g = θ0`. | T07, T11 |
-| PHY-7 | Odometry trên app server sau khi nhân 1.89, tích phân trung điểm theo `t_mono_ns` của robot; bỏ mẫu có `dt ≤ 0` hoặc `dt > 0.5` s. | T06 |
+| PHY-7 | Odometry trên app server từ vận tốc đo của STM (không quy đổi), tích phân trung điểm theo `t_mono_ns` của robot; bỏ mẫu có `dt ≤ 0` hoặc `dt > 0.5` s. | T06 |
 
 ## 7. Phi chức năng
 
@@ -92,7 +92,7 @@ Bánh A, B, C, D với `ε = (+,−,+,−)`, `s = (−,−,+,+)` (theo `docs/dyn
 
 ## 8. Giả định và xác nhận
 
-- **A-1 (đã xác nhận):** Telemetry vận tốc từ STM32 được server nhân 1.89 trước khi lên web. IMU không nhân.
+- **A-1 (thay đổi):** Telemetry vận tốc từ STM32 lên web giữ nguyên, không nhân hệ số nào (hệ số 1.89 cũ đã bỏ).
 - **A-2 (đã xác nhận):** `L` là khoảng cách cầu trước đến cầu sau, `d` là khoảng cách tâm bánh trái đến phải, nên `lever = (L+d)/2 = 0.335`.
 - **A-3 (đã xác nhận):** Đích dùng `x, y, θ`, không có `z`. θ là rad trong giao thức, độ trên UI.
 - **A-4 (chưa xác nhận):** Bố cục frame phụ không có trong repo. Tạm dùng `[1:3]` dòng sạc mA, `[3]` red, `[4]` charging, `[5]` set_state; kiểm chứng ở T15.

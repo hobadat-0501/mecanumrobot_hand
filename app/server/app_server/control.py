@@ -1,6 +1,6 @@
-"""Control core: arm state, driving rights, cmd_vel validation, 1.89 division, watchdog.
+"""Control core: arm state, driving rights, cmd_vel validation, watchdog.
 
-The ONLY place the 1.89 factor is applied to commands is `to_wire_units` (SAF-01).
+cmd_vel passes through unchanged: web units and wire units are the same (SAF-01).
 No speed limit or clamp exists here (SAF-04).
 """
 
@@ -11,16 +11,9 @@ import math
 import time
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
-# Telemetry (T06) imports this same constant to multiply velocities back.
-CMD_VEL_DIVISOR = 1.89
 WATCHDOG_S = 0.25
 
 Vec3 = Tuple[float, float, float]
-
-
-def to_wire_units(vx: float, vy: float, wz: float) -> Vec3:
-    """Web units -> wire units. The single place that divides by CMD_VEL_DIVISOR."""
-    return (vx / CMD_VEL_DIVISOR, vy / CMD_VEL_DIVISOR, wz / CMD_VEL_DIVISOR)
 
 
 def token_matches(supplied: Any, expected: str) -> bool:
@@ -140,10 +133,10 @@ class ControlSession:
         self._cmd_web = (0.0, 0.0, 0.0)
 
     def handle_cmd_vel(self, client_id: str, msg: Any) -> Optional[Dict[str, Any]]:
-        """Validate and convert a cmd_vel.
+        """Validate a cmd_vel.
 
         Raises ValueError if invalid. Returns None when not forwarded (disarmed or not the
-        driver). Otherwise returns {"seq","vx","vy","wz"} in wire units (FR-03).
+        driver). Otherwise returns {"seq","vx","vy","wz"} unchanged (FR-03).
         """
         seq, vx, vy, wz = validate_cmd_vel(msg)
         if not self._armed or client_id != self._driver:
@@ -151,8 +144,7 @@ class ControlSession:
         self._last_cmd_at = self._clock()
         self._cmd_web = (vx, vy, wz)
         self._last_seq = seq
-        wvx, wvy, wwz = to_wire_units(vx, vy, wz)
-        return {"seq": seq, "vx": wvx, "vy": wvy, "wz": wwz}
+        return {"seq": seq, "vx": vx, "vy": vy, "wz": wz}
 
     def watchdog_tripped(self) -> bool:
         """True once when 250 ms passed since the last accepted command (T06 emits zero)."""
@@ -165,7 +157,7 @@ class ControlSession:
         return True
 
     def snapshot(self) -> Dict[str, Any]:
-        """Session part of the state message; web units only, never wire values or the factor."""
+        """Session part of the state message; the commanded velocity as sent."""
         vx, vy, wz = self._cmd_web
         return {
             "armed": self._armed,

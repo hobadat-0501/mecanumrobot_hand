@@ -15,7 +15,6 @@ import dataclasses
 import json
 import math
 import statistics
-import struct
 import time
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -34,7 +33,6 @@ from robot_agent.sim import SimulatedLidar, SimulatedStm32
 LINK_TOKEN = "e2e-link-token"
 OPERATOR_TOKEN = "e2e-operator-token"
 ORIGIN = "http://100.119.83.63:3000"
-FACTOR = 1.89  # only used here to prove that nothing on the web side carries it
 
 LOOP_P95_BOUND_S = 0.150  # NFR-02: cmd_vel -> last_cmd_seq in state
 STOP_BOUND_S = 0.300  # NFR-02 / SAF-03: event -> zero at the STM32 (operator gone, link cut, disarm)
@@ -270,7 +268,7 @@ async def become_driver_and_arm(web, app, *, arm=True):
         await web.wait_state(lambda s: s["session"]["armed"], since=since)
 
 
-async def drive_for(web, seq, seconds, vx=0.189):
+async def drive_for(web, seq, seconds, vx=0.1):
     """Send cmd_vel at 20 Hz for `seconds`. Returns (last seq, monotonic time of the last send)."""
     end = time.monotonic() + seconds
     sent_at = time.monotonic()
@@ -327,42 +325,27 @@ def numbers_below(value, path=()):
         yield path, None, value
 
 
-async def test_units_web_0_189_is_robot_0_1_and_the_web_never_sees_wire_values():
+async def test_cmd_vel_reaches_the_robot_unchanged_and_state_reports_it():
     async with rig() as r:
         async with web_connect(r.app) as web:
             await become_driver_and_arm(web, r.app)
             seq = 0
             seq, _ = await drive_for(web, seq, 1.2)
-            # Robot side: every non-zero write is 0.189 / 1.89 = 0.1 (wire units).
+            # Robot side: every non-zero write equals the command (0.1, no scaling).
             moving = nonzero_entries(r.stm)
             assert moving
             for entry in moving:
                 assert entry[1] == pytest.approx(0.1) and entry[2] == 0.0 and entry[3] == 0.0
-            # Web side: the robot's 0.1 comes back as 0.189, and the command in web units too.
+            # Web side: the measured velocity and the command are the same 0.1.
             _, state = web.states[-1]
-            assert state["vel"]["vx"] == pytest.approx(0.189, abs=0.003)
-            assert state["cmd"]["vx"] == pytest.approx(0.189)
+            assert state["vel"]["vx"] == pytest.approx(0.1, abs=0.003)
+            assert state["cmd"]["vx"] == pytest.approx(0.1)
             assert state["last_cmd_seq"] in range(seq - 3, seq + 1)
-
-            # Nothing received by the web may carry a wire value, the factor or its inverse.
-            forbidden = (0.1, FACTOR, 1 / FACTOR)
             assert len(web.texts) >= 10
-            for text in web.texts:
-                for path, key, number in numbers_below(json.loads(text)):
-                    if key is not None:
-                        assert not any(w in key.lower() for w in ("wire", "divisor", "factor", "scale"))
-                    elif path not in (("pose",), ("link",), ("link", "rtt_ms")):  # pose integrates, rtt_ms is a time
-                        assert not any(math.isclose(number, f, rel_tol=1e-6) for f in forbidden), (
-                            path,
-                            number,
-                        )
-            # Binary scan frames: PROTO-2 shape, and no packed copy of those numbers.
+            # Binary scan frames: PROTO-2 shape.
             assert len(web.frames) >= 2
             for frame in web.frames:
                 assert len(frame) == 734 and frame[0] == 2 and frame[1] == 1
-                for number in forbidden:
-                    for fmt in ("<d", "<f"):
-                        assert struct.pack(fmt, number) not in frame
 
 
 # ======================================================================================
@@ -388,7 +371,7 @@ async def test_disarmed_by_default_viewer_cannot_drive_bad_origin_refused():
             await viewer.send(t="arm", on=True)
             await viewer.send(t="hello", token="wrong-token")
             await viewer.send(t="arm", on=True)
-            await viewer.send(t="cmd_vel", seq=1, vx=0.189, vy=0.0, wz=0.0, src="kbd")
+            await viewer.send(t="cmd_vel", seq=1, vx=0.1, vy=0.0, wz=0.0, src="kbd")
             await asyncio.sleep(0.4)
             _, state = viewer.states[-1]
             assert state["session"]["armed"] is False and state["session"]["role"] == "viewer"
@@ -398,13 +381,13 @@ async def test_disarmed_by_default_viewer_cannot_drive_bad_origin_refused():
             await become_driver_and_arm(viewer, r.app, arm=False)
             _, state = viewer.states[-1]
             assert state["session"]["armed"] is False
-            await viewer.send(t="cmd_vel", seq=2, vx=0.189, vy=0.0, wz=0.0, src="kbd")
+            await viewer.send(t="cmd_vel", seq=2, vx=0.1, vy=0.0, wz=0.0, src="kbd")
             await asyncio.sleep(0.4)
             assert nonzero_entries(r.stm) == []
             since = len(viewer.states)
             await viewer.send(t="arm", on=True)
             await viewer.wait_state(lambda s: s["session"]["armed"], since=since)
-            await viewer.send(t="cmd_vel", seq=3, vx=0.189, vy=0.0, wz=0.0, src="kbd")
+            await viewer.send(t="cmd_vel", seq=3, vx=0.1, vy=0.0, wz=0.0, src="kbd")
             await wait_until(lambda: nonzero_entries(r.stm))
 
 
@@ -440,7 +423,7 @@ async def measure_loop(web, seq0, count):
         seq = seq0 + i + 1
         since = len(web.states)
         t0 = time.monotonic()
-        await web.send(t="cmd_vel", seq=seq, vx=0.189, vy=0.0, wz=0.0, src="kbd")
+        await web.send(t="cmd_vel", seq=seq, vx=0.1, vy=0.0, wz=0.0, src="kbd")
         stamp, _ = await web.wait_state(lambda s, q=seq: s["last_cmd_seq"] == q, since=since)
         latencies.append(stamp - t0)
         # A varying gap (20 to 80 ms, always inside the 250 ms command timeout) so the samples are
@@ -656,19 +639,19 @@ async def test_large_finite_values_are_sent_as_is_and_int16_overflow_is_rejected
     async with rig() as r:
         async with web_connect(r.app) as web:
             await become_driver_and_arm(web, r.app)
-            # 10 m/s on the web is 5.29 m/s on the wire: it fits the int16 frame, so it is not
+            # 10 m/s fits the int16 frame, so it is not
             # clamped by the app server or the robot.
             since = len(web.states)
             await web.send(t="cmd_vel", seq=1, vx=10.0, vy=-10.0, wz=10.0, src="kbd")
             await web.wait_state(lambda s: s["last_cmd_seq"] == 1, since=since)
             await wait_until(lambda: nonzero_entries(r.stm))
             for entry in nonzero_entries(r.stm):
-                assert entry[1] == pytest.approx(10.0 / FACTOR)
-                assert entry[2] == pytest.approx(-10.0 / FACTOR)
-                assert entry[3] == pytest.approx(10.0 / FACTOR)
+                assert entry[1] == pytest.approx(10.0)
+                assert entry[2] == pytest.approx(-10.0)
+                assert entry[3] == pytest.approx(10.0)
             assert r.writer.health().rejected_count == 0
 
-            # 70 m/s is 37.04 m/s on the wire, more than int16 millimetres can carry: rejected,
+            # 70 m/s is more than int16 millimetres can carry: rejected,
             # not clamped, and zero takes the place of the previous command.
             t0 = time.monotonic()
             await web.send(t="cmd_vel", seq=2, vx=70.0, vy=0.0, wz=0.0, src="kbd")
@@ -676,7 +659,7 @@ async def test_large_finite_values_are_sent_as_is_and_int16_overflow_is_rejected
             print("[e2e] SAF-04 int16 overflow -> zero: %.0f ms" % (latency * 1000))
             assert latency <= FLAG_BOUND_S
             await wait_until(lambda: r.writer.health().rejected_count == 1)
-            assert max(abs(e[1]) for e in list(r.stm.log)) < 6.0  # no clamped 32.767 anywhere
+            assert max(abs(e[1]) for e in list(r.stm.log)) < 11.0  # no clamped 32.767 anywhere
 
             # A huge finite value (the factor division stays finite) is rejected the same way.
             await web.send(t="cmd_vel", seq=3, vx=1e308, vy=0.0, wz=0.0, src="kbd")
