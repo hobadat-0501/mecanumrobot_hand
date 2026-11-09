@@ -1170,11 +1170,867 @@ Trạng thái: `TODO → ORDERED → CODED → PASS → MERGED` hoặc `BLOCKED`
 ## P3 — Nền client
 
 ### T07 — Thư viện vật lý
-- Trạng thái: TODO · Plan: P3 · Phụ thuộc: T01
+- Trạng thái: CODED · Plan: P3 · Phụ thuộc: T01
 - Spec: PHY-1, PHY-2, PHY-3, PHY-4, PHY-5, PHY-6, NFR-04
-- File: `app/client/src/robot/{mecanum,motion,mecanum.test}.ts`, `app/client/package.json` (thêm vitest)
+- File: `app/client/src/robot/{mecanum,motion,mecanum.test}.ts`, `app/client/package.json` và `package-lock.json` (thêm vitest)
 - Đạt khi: các test vector trong PHY-2, PHY-3, PHY-5 qua; thuận rồi ngược trả lại đầu vào; bộ bám đạt tiêu chí xong trên mô hình giả lập.
-- Work order: _(Sonnet điền)_
+- Work order:
+
+  **QUY TẮC ĐẦU TIÊN: Chỉ chạm các file được liệt kê dưới đây. Nếu thiếu thông tin hoặc có mâu thuẫn, dừng lại và trả `BLOCKED` kèm câu hỏi. Không chạy `git commit` (không chạy git làm đổi repo). Không tự thiết kế: chép đúng nội dung file bên dưới.**
+
+  Thư mục làm việc: worktree `/tmp/claude-1000/-home-vth-ws-mecanum-base/76fe0d3b-44a2-4858-8e13-7f99f2566330/scratchpad/wt/T07` (nhánh `feature/T07-physics-lib`). Mọi lệnh npm chạy trong `app/client` của worktree này, không phải `/home/vth/ws/mecanum_base`. `app/client/node_modules` là symlink tới bản cài dùng chung; `npm install` sẽ ghi vào đó, đó là chủ ý.
+
+  File được chạm (và chỉ các file này):
+  - `app/client/package.json` và `app/client/package-lock.json` (do `npm install`, thêm vitest và script `test`)
+  - tạo mới `app/client/src/robot/mecanum.ts`
+  - tạo mới `app/client/src/robot/motion.ts`
+  - tạo mới `app/client/src/robot/mecanum.test.ts`
+
+  Không sửa `next.config.ts`, `tsconfig.json`, `eslint.config.mjs`. Không tạo `vitest.config.*`. Thư mục `app/client/src/robot/` chưa có, tạo bằng `mkdir -p`.
+
+  **Ràng buộc SAF-01 (tuyệt đối).** Hệ số chia của `cmd_vel` và mọi tên gọi cho nó không được xuất hiện ở bất kỳ file client nào, kể cả chú thích và test. Các file dưới đây đã sạch; không thêm chú thích nhắc tới hệ số đó. Bước 6 có lệnh kiểm tra. Không thêm giới hạn tốc độ nào (SAF-04): `FR-04` cảnh báo tổng tốc độ chỉ là hàm trả `boolean`, không được dùng để kẹp hay chặn.
+
+  **Bước 1. Cài vitest.** Chạy trong `app/client`:
+  `npm install -D vitest@^4`
+  Phải dùng `vitest@^4`. Bản mới nhất (5.x) đòi `@types/node` >= 22 và `npm install` báo lỗi ERESOLVE vì dự án dùng `@types/node@^20`. Nếu vẫn ERESOLVE với `vitest@^4`, trả `BLOCKED` kèm toàn bộ thông báo lỗi; không dùng `--force` hay `--legacy-peer-deps`. Mong đợi: kết thúc không lỗi, `package.json` có `"vitest": "^4.x.y"` trong `devDependencies`, `package-lock.json` đổi theo.
+
+  **Bước 2. Thêm script test.** Trong `app/client/package.json`, mục `"scripts"`, thêm sau dòng `"lint": "eslint"` (nhớ thêm dấu phẩy sau `"eslint"`):
+  ```json
+      "lint": "eslint",
+      "test": "vitest run"
+  ```
+  Không đổi gì khác trong `package.json` ngoài dòng vitest do npm thêm.
+
+  **Bước 3. Tạo `app/client/src/robot/mecanum.ts`** với đúng nội dung sau:
+  ```ts
+    // Công thức vật lý PHY-1..PHY-5 (spec.md §6). Thuần TypeScript, không dùng React hay DOM.
+    // Mọi vận tốc ở đây là đơn vị web (m/s, rad/s).
+
+    // PHY-1: thông số, khai báo một chỗ duy nhất.
+    export const L = 0.32; // m, tâm cầu trước đến tâm cầu sau
+    export const D = 0.35; // m, tâm bánh trái đến tâm bánh phải
+    export const R = 0.05; // m, bán kính bánh
+    export const LEVER = (L + D) / 2; // 0.335 m (A-2)
+    export const MASS = 9.7; // kg
+    export const GRAVITY = 9.81; // m/s^2
+    export const MU_R = 0.05; // hệ số cản lăn
+    export const I_Z = MASS * ((L / 2) ** 2 + (D / 2) ** 2); // ~0.5454 kg.m^2
+    export const TAU_RATED = 0.981; // N.m, mô-men định mức mỗi bánh
+    export const F_C = (MU_R * MASS * GRAVITY) / 4; // lực cản lăn mỗi bánh
+    export const FILTER_TAU = 0.1; // s, hằng số thời gian bộ lọc PHY-5
+    export const SPEED_SUM_LIMIT = 1.6; // ngưỡng cảnh báo FR-04
+
+    /** Bốn bánh theo thứ tự A, B, C, D. */
+    export type Wheels = readonly [number, number, number, number];
+    export type Flags4 = readonly [boolean, boolean, boolean, boolean];
+
+    /** Dấu ε của bánh A, B, C, D. */
+    export const EPS: Wheels = [1, -1, 1, -1];
+    /** Dấu s của bánh A, B, C, D. */
+    export const SGN: Wheels = [-1, -1, 1, 1];
+
+    export interface BodyVel {
+      vx: number;
+      vy: number;
+      wz: number;
+    }
+
+    export interface Pose {
+      x: number;
+      y: number;
+      theta: number;
+    }
+
+    function wheelsOf(f: (i: number) => number): Wheels {
+      return [f(0), f(1), f(2), f(3)];
+    }
+
+    function signOf(x: number): number {
+      return x > 0 ? 1 : x < 0 ? -1 : 0;
+    }
+
+    /** PHY-2: động học ngược, vận tốc thân -> tốc độ 4 bánh (rad/s). */
+    export function inverseKinematics(v: BodyVel): Wheels {
+      return wheelsOf((i) => (v.vx + EPS[i] * v.vy + SGN[i] * LEVER * v.wz) / R);
+    }
+
+    /** PHY-3: động học thuận, tốc độ 4 bánh (rad/s) -> vận tốc thân. */
+    export function forwardKinematics(w: Wheels): BodyVel {
+      let sum = 0;
+      let sumEps = 0;
+      let sumSgn = 0;
+      for (let i = 0; i < 4; i++) {
+        sum += w[i];
+        sumEps += EPS[i] * w[i];
+        sumSgn += SGN[i] * w[i];
+      }
+      return {
+        vx: (R / 4) * sum,
+        vy: (R / 4) * sumEps,
+        wz: (R / (4 * LEVER)) * sumSgn,
+      };
+    }
+
+    /** PHY-3: thành phần dư e (m/s). Khác 0 nghĩa là bánh đánh nhau. */
+    export function wheelResidual(w: Wheels): number {
+      return (R / 4) * (w[0] - w[1] - w[2] + w[3]);
+    }
+
+    /** PHY-4: vận tốc thân sang đạo hàm tư thế trong khung thế giới. */
+    export function bodyToWorld(
+      v: BodyVel,
+      theta: number,
+    ): { xDot: number; yDot: number; thetaDot: number } {
+      const c = Math.cos(theta);
+      const s = Math.sin(theta);
+      return {
+        xDot: v.vx * c - v.vy * s,
+        yDot: v.vx * s + v.vy * c,
+        thetaDot: v.wz,
+      };
+    }
+
+    /** FR-04: tổng |vx| + |vy| + lever*|wz| (m/s). */
+    export function speedSum(v: BodyVel): number {
+      return Math.abs(v.vx) + Math.abs(v.vy) + LEVER * Math.abs(v.wz);
+    }
+
+    /** FR-04: true khi vượt 1.6 m/s. Chỉ để cảnh báo, không được dùng để chặn lệnh. */
+    export function exceedsSpeedSum(v: BodyVel): boolean {
+      return speedSum(v) > SPEED_SUM_LIMIT;
+    }
+
+    export interface DynamicsResult {
+      ax: number;
+      ay: number;
+      wzDot: number;
+      Fx: number;
+      Fy: number;
+      Mz: number;
+      /** Lực dọc từng bánh F_d,i (N). */
+      Fd: Wheels;
+      /** Mô-men từng bánh tau_i (N.m). */
+      tau: Wheels;
+      /** |tau_i| / TAU_RATED * 100. */
+      tauPct: Wheels;
+      /** true khi |tau_i| > TAU_RATED. */
+      over: Flags4;
+    }
+
+    /**
+     * PHY-5 phần lực: từ gia tốc thân (ax, ay đã trừ thành phần ly tâm) và wzDot
+     * tính lực, mô-men. `wheels` chỉ dùng để lấy dấu sign(omega_i) của lực cản lăn.
+     */
+    export function computeDynamics(
+      acc: { ax: number; ay: number; wzDot: number },
+      wheels: Wheels,
+    ): DynamicsResult {
+      const Fx = MASS * acc.ax;
+      const Fy = MASS * acc.ay;
+      const Mz = I_Z * acc.wzDot;
+      const Fd = wheelsOf((i) => (Fx + EPS[i] * Fy + (SGN[i] * Mz) / LEVER) / 4);
+      const tau = wheelsOf((i) => R * (Fd[i] + F_C * signOf(wheels[i])));
+      const tauPct = wheelsOf((i) => (100 * Math.abs(tau[i])) / TAU_RATED);
+      const over: Flags4 = [
+        Math.abs(tau[0]) > TAU_RATED,
+        Math.abs(tau[1]) > TAU_RATED,
+        Math.abs(tau[2]) > TAU_RATED,
+        Math.abs(tau[3]) > TAU_RATED,
+      ];
+      return {
+        ax: acc.ax,
+        ay: acc.ay,
+        wzDot: acc.wzDot,
+        Fx,
+        Fy,
+        Mz,
+        Fd,
+        tau,
+        tauPct,
+        over,
+      };
+    }
+
+    /**
+     * PHY-5: ước lượng động lực học từ vận tốc đo. Đạo hàm vận tốc được lọc thông
+     * thấp bậc 1 (hằng số thời gian `tau`, mặc định 0.1 s). Gọi `update` mỗi lần có
+     * mẫu vận tốc mới, kèm dt (s) kể từ mẫu trước.
+     */
+    export class DynamicsEstimator {
+      private readonly tauFilter: number;
+      private prev: BodyVel | null = null;
+      private vxDot = 0;
+      private vyDot = 0;
+      private wzDotF = 0;
+
+      constructor(tauFilter: number = FILTER_TAU) {
+        this.tauFilter = tauFilter;
+      }
+
+      reset(): void {
+        this.prev = null;
+        this.vxDot = 0;
+        this.vyDot = 0;
+        this.wzDotF = 0;
+      }
+
+      /** `v` là vận tốc đo (đơn vị web), `wheels` là tốc độ bánh (rad/s) tương ứng. */
+      update(v: BodyVel, wheels: Wheels, dt: number): DynamicsResult {
+        if (Number.isFinite(dt) && dt > 0) {
+          if (this.prev !== null) {
+            const alpha = dt / (this.tauFilter + dt);
+            this.vxDot += alpha * ((v.vx - this.prev.vx) / dt - this.vxDot);
+            this.vyDot += alpha * ((v.vy - this.prev.vy) / dt - this.vyDot);
+            this.wzDotF += alpha * ((v.wz - this.prev.wz) / dt - this.wzDotF);
+          }
+          this.prev = { vx: v.vx, vy: v.vy, wz: v.wz };
+        }
+        return computeDynamics(
+          {
+            ax: this.vxDot - v.wz * v.vy,
+            ay: this.vyDot + v.wz * v.vx,
+            wzDot: this.wzDotF,
+          },
+          wheels,
+        );
+      }
+    }
+  ```
+
+  **Bước 4. Tạo `app/client/src/robot/motion.ts`** với đúng nội dung sau:
+  ```ts
+    // PHY-6: bộ bám đích và chạy theo tốc độ bánh. Thuần TypeScript, không dùng React hay DOM.
+    // Mọi hàm là bước tính thuần: nhận trạng thái + đầu vào, trả trạng thái mới + cmd_vel.
+    // Đầu ra chuyển động duy nhất là cmd_vel (vx, vy, wz) theo đơn vị web.
+
+    import { forwardKinematics } from "./mecanum";
+    import type { BodyVel, Pose, Wheels } from "./mecanum";
+
+    export const CONTROL_HZ = 20;
+    export const KP_LIN = 1.0;
+    export const KP_ANG = 1.5;
+    export const TOL_POS = 0.02; // m
+    export const TOL_ANG = 0.035; // rad
+    export const DONE_CYCLES = 3;
+    export const STALE_S = 0.5; // s
+
+    export interface RunParams {
+      /** Tốc độ tịnh tiến chạy (m/s). Không chặn trên. */
+      vCruise: number;
+      /** Tốc độ quay chạy (rad/s). Không chặn trên. */
+      wzCruise: number;
+      /** Gia tốc tịnh tiến tối đa (m/s^2). Không chặn trên. */
+      accelLin: number;
+      /** Gia tốc góc tối đa (rad/s^2). Không chặn trên. */
+      accelAng: number;
+    }
+
+    export const DEFAULT_RUN_PARAMS: RunParams = {
+      vCruise: 0.2,
+      wzCruise: 1.0,
+      accelLin: 0.5,
+      accelAng: 1.5,
+    };
+
+    export type AbortReason = "stale" | "disarmed" | "key" | "timeout";
+
+    export type RunStatus =
+      | { kind: "running" }
+      | { kind: "done" }
+      | { kind: "aborted"; reason: AbortReason };
+
+    /** Điều kiện hủy dùng chung cho bộ bám đích và chạy theo tốc độ bánh. */
+    export interface RunContext {
+      /** Tuổi của state mới nhất (s). */
+      stateAgeS: number;
+      armed: boolean;
+      /** Có phím di chuyển đang được giữ. */
+      keyPressed: boolean;
+    }
+
+    function zeroCmd(): BodyVel {
+      return { vx: 0, vy: 0, wz: 0 };
+    }
+
+    /** Quấn góc về [-pi, pi]. */
+    export function wrapAngle(a: number): number {
+      return Math.atan2(Math.sin(a), Math.cos(a));
+    }
+
+    /** Trả thông báo lỗi nếu tham số chạy không hợp lệ, ngược lại null. Không đặt chặn trên. */
+    export function validateRunParams(p: RunParams): string | null {
+      const entries: [string, number][] = [
+        ["vCruise", p.vCruise],
+        ["wzCruise", p.wzCruise],
+        ["accelLin", p.accelLin],
+        ["accelAng", p.accelAng],
+      ];
+      for (const [name, value] of entries) {
+        if (!Number.isFinite(value) || value <= 0) {
+          return `${name} phải là số hữu hạn lớn hơn 0`;
+        }
+      }
+      return null;
+    }
+
+    /** Lý do hủy theo RunContext, hoặc null. Thứ tự ưu tiên: disarmed, key, stale. */
+    export function abortReason(ctx: RunContext): AbortReason | null {
+      if (!ctx.armed) return "disarmed";
+      if (ctx.keyPressed) return "key";
+      if (!(ctx.stateAgeS <= STALE_S)) return "stale";
+      return null;
+    }
+
+    /** PHY-6 kiểu A: quy đổi (quãng đường s, hướng alpha rad so với thân) sang tư thế đích. */
+    export function goalFromDistanceHeading(
+      start: Pose,
+      s: number,
+      alpha: number,
+    ): Pose {
+      return {
+        x: start.x + s * Math.cos(start.theta + alpha),
+        y: start.y + s * Math.sin(start.theta + alpha),
+        theta: start.theta,
+      };
+    }
+
+    /** T_dự_kiến (s) = max(quãng đường / vCruise, |góc quay| / wzCruise). */
+    export function expectedDuration(
+      start: Pose,
+      goal: Pose,
+      p: RunParams,
+    ): number {
+      const dist = Math.hypot(goal.x - start.x, goal.y - start.y);
+      const ang = Math.abs(wrapAngle(goal.theta - start.theta));
+      return Math.max(dist / p.vCruise, ang / p.wzCruise);
+    }
+
+    export interface TrackError {
+      /** Sai số thế giới. */
+      ex: number;
+      ey: number;
+      /** Sai số quay về khung thân. */
+      ebx: number;
+      eby: number;
+      dist: number;
+      /** Sai số góc đã quấn về [-pi, pi]. */
+      etheta: number;
+    }
+
+    /** Sai số tới đích; world -> body bằng góc theta của xe. */
+    export function trackError(pose: Pose, goal: Pose): TrackError {
+      const ex = goal.x - pose.x;
+      const ey = goal.y - pose.y;
+      const c = Math.cos(pose.theta);
+      const s = Math.sin(pose.theta);
+      return {
+        ex,
+        ey,
+        ebx: c * ex + s * ey,
+        eby: -s * ex + c * ey,
+        dist: Math.hypot(ex, ey),
+        etheta: wrapAngle(goal.theta - pose.theta),
+      };
+    }
+
+    export interface TrackState {
+      goal: Pose;
+      params: RunParams;
+      /** Hạn chót = 3 * T_dự_kiến + 5 (s). */
+      timeoutS: number;
+      elapsed: number;
+      /** Số chu kỳ liên tiếp đã nằm trong dung sai. */
+      okCycles: number;
+      /** cmd_vel của chu kỳ trước, dùng để giới hạn gia tốc. */
+      prevCmd: BodyVel;
+    }
+
+    /** Tạo trạng thái bám đích. Ném RangeError nếu tham số hoặc tư thế không hợp lệ. */
+    export function createTrack(
+      start: Pose,
+      goal: Pose,
+      params: RunParams,
+    ): TrackState {
+      const msg = validateRunParams(params);
+      if (msg !== null) throw new RangeError(msg);
+      const nums = [start.x, start.y, start.theta, goal.x, goal.y, goal.theta];
+      if (!nums.every((n) => Number.isFinite(n))) {
+        throw new RangeError("tư thế đầu hoặc đích không hữu hạn");
+      }
+      return {
+        goal: { ...goal },
+        params: { ...params },
+        timeoutS: 3 * expectedDuration(start, goal, params) + 5,
+        elapsed: 0,
+        okCycles: 0,
+        prevCmd: zeroCmd(),
+      };
+    }
+
+    export interface TrackInput extends RunContext {
+      /** Tư thế hiện tại (khung odometry). */
+      pose: Pose;
+      /** Thời gian từ chu kỳ trước (s), thường 1/CONTROL_HZ. */
+      dt: number;
+    }
+
+    export interface TrackStep {
+      cmd: BodyVel;
+      state: TrackState;
+      status: RunStatus;
+      error: TrackError;
+    }
+
+    /** Một chu kỳ điều khiển PHY-6. Khi done hoặc aborted, cmd là 0. */
+    export function trackStep(s: TrackState, input: TrackInput): TrackStep {
+      const dt = Number.isFinite(input.dt) && input.dt > 0 ? input.dt : 0;
+      const elapsed = s.elapsed + dt;
+      const error = trackError(input.pose, s.goal);
+
+      let reason = abortReason(input);
+      if (reason === null && elapsed > s.timeoutS) reason = "timeout";
+      if (reason !== null) {
+        return {
+          cmd: zeroCmd(),
+          state: { ...s, elapsed, okCycles: 0, prevCmd: zeroCmd() },
+          status: { kind: "aborted", reason },
+          error,
+        };
+      }
+
+      const inTol = error.dist < TOL_POS && Math.abs(error.etheta) < TOL_ANG;
+      const okCycles = inTol ? s.okCycles + 1 : 0;
+      if (okCycles >= DONE_CYCLES) {
+        return {
+          cmd: zeroCmd(),
+          state: { ...s, elapsed, okCycles, prevCmd: zeroCmd() },
+          status: { kind: "done" },
+          error,
+        };
+      }
+
+      const p = s.params;
+      // Tốc độ mong muốn; thu nhỏ vector tịnh tiến để giữ hướng.
+      let vx = KP_LIN * error.ebx;
+      let vy = KP_LIN * error.eby;
+      const speed = Math.hypot(vx, vy);
+      if (speed > p.vCruise) {
+        const k = p.vCruise / speed;
+        vx *= k;
+        vy *= k;
+      }
+      let wz = KP_ANG * error.etheta;
+      if (Math.abs(wz) > p.wzCruise) wz = Math.sign(wz) * p.wzCruise;
+
+      // Giới hạn gia tốc: thu nhỏ vector thay đổi tịnh tiến để giữ hướng; wz giới hạn riêng.
+      let dvx = vx - s.prevCmd.vx;
+      let dvy = vy - s.prevCmd.vy;
+      const dv = Math.hypot(dvx, dvy);
+      const maxDv = p.accelLin * dt;
+      if (dv > maxDv) {
+        const k = maxDv / dv;
+        dvx *= k;
+        dvy *= k;
+      }
+      const maxDw = p.accelAng * dt;
+      const dw = Math.max(-maxDw, Math.min(maxDw, wz - s.prevCmd.wz));
+
+      const cmd: BodyVel = {
+        vx: s.prevCmd.vx + dvx,
+        vy: s.prevCmd.vy + dvy,
+        wz: s.prevCmd.wz + dw,
+      };
+      return {
+        cmd,
+        state: { ...s, elapsed, okCycles, prevCmd: { ...cmd } },
+        status: { kind: "running" },
+        error,
+      };
+    }
+
+    export interface WheelRun {
+      /** cmd_vel cố định tính từ tốc độ bánh bằng động học thuận. */
+      cmd: BodyVel;
+      durationS: number;
+      elapsed: number;
+    }
+
+    /** FR-04: tạo lần chạy theo tốc độ bánh (rad/s) trong durationS giây. Ném RangeError nếu không hợp lệ. */
+    export function createWheelRun(wheels: Wheels, durationS: number): WheelRun {
+      if (!wheels.every((w) => Number.isFinite(w))) {
+        throw new RangeError("tốc độ bánh không hữu hạn");
+      }
+      if (!Number.isFinite(durationS) || durationS <= 0) {
+        throw new RangeError("thời gian chạy phải là số hữu hạn lớn hơn 0");
+      }
+      return { cmd: forwardKinematics(wheels), durationS, elapsed: 0 };
+    }
+
+    export interface WheelRunStep {
+      cmd: BodyVel;
+      run: WheelRun;
+      status: RunStatus;
+    }
+
+    /** Một chu kỳ chạy theo tốc độ bánh. Hết giờ thì done; hủy theo RunContext thì aborted. cmd là 0 khi kết thúc. */
+    export function wheelRunStep(
+      run: WheelRun,
+      ctx: RunContext,
+      dt: number,
+    ): WheelRunStep {
+      const elapsed = run.elapsed + (Number.isFinite(dt) && dt > 0 ? dt : 0);
+      const next: WheelRun = { ...run, elapsed };
+      const reason = abortReason(ctx);
+      if (reason !== null) {
+        return { cmd: zeroCmd(), run: next, status: { kind: "aborted", reason } };
+      }
+      if (elapsed >= run.durationS) {
+        return { cmd: zeroCmd(), run: next, status: { kind: "done" } };
+      }
+      return { cmd: { ...run.cmd }, run: next, status: { kind: "running" } };
+    }
+  ```
+
+  **Bước 5. Tạo `app/client/src/robot/mecanum.test.ts`** với đúng nội dung sau:
+  ```ts
+    import { describe, expect, it } from "vitest";
+    import {
+      DynamicsEstimator,
+      I_Z,
+      LEVER,
+      bodyToWorld,
+      computeDynamics,
+      exceedsSpeedSum,
+      forwardKinematics,
+      inverseKinematics,
+      wheelResidual,
+    } from "./mecanum";
+    import type { BodyVel, Pose, Wheels } from "./mecanum";
+    import {
+      DEFAULT_RUN_PARAMS,
+      createTrack,
+      createWheelRun,
+      expectedDuration,
+      goalFromDistanceHeading,
+      trackStep,
+      wheelRunStep,
+      wrapAngle,
+    } from "./motion";
+    import type { RunParams, RunStatus, TrackInput } from "./motion";
+
+    const V: BodyVel = { vx: 0.1, vy: 0.05, wz: 0.2 };
+
+    describe("PHY-1", () => {
+      it("thông số dẫn xuất", () => {
+        expect(LEVER).toBeCloseTo(0.335, 12);
+        expect(I_Z).toBeCloseTo(0.5454, 4);
+      });
+    });
+
+    describe("PHY-2/PHY-3 động học", () => {
+      it("ngược: (0.1, 0.05, 0.2) -> (1.66, -0.34, 4.34, 2.34)", () => {
+        const w = inverseKinematics(V);
+        [1.66, -0.34, 4.34, 2.34].forEach((e, i) => expect(w[i]).toBeCloseTo(e, 9));
+      });
+
+      it("thuận rồi ngược trả lại đầu vào", () => {
+        const back = forwardKinematics(inverseKinematics(V));
+        expect(back.vx).toBeCloseTo(V.vx, 12);
+        expect(back.vy).toBeCloseTo(V.vy, 12);
+        expect(back.wz).toBeCloseTo(V.wz, 12);
+      });
+
+      it("dư bằng 0 với bánh nhất quán", () => {
+        expect(wheelResidual(inverseKinematics(V))).toBeCloseTo(0, 12);
+      });
+
+      it("dư khác 0 với (1, -1, -1, 1) và thuận cho vận tốc 0", () => {
+        const w: Wheels = [1, -1, -1, 1];
+        expect(wheelResidual(w)).toBeCloseTo(0.05, 12);
+        const v = forwardKinematics(w);
+        expect(v.vx).toBeCloseTo(0, 12);
+        expect(v.vy).toBeCloseTo(0, 12);
+        expect(v.wz).toBeCloseTo(0, 12);
+      });
+    });
+
+    describe("PHY-4 thân sang thế giới", () => {
+      it("theta = 0 giữ nguyên", () => {
+        const r = bodyToWorld({ vx: 1, vy: 0.5, wz: 0.3 }, 0);
+        expect(r.xDot).toBeCloseTo(1, 12);
+        expect(r.yDot).toBeCloseTo(0.5, 12);
+        expect(r.thetaDot).toBeCloseTo(0.3, 12);
+      });
+
+      it("theta = pi/2: tiến về +y, trái về -x", () => {
+        const r = bodyToWorld({ vx: 1, vy: 0.5, wz: 0 }, Math.PI / 2);
+        expect(r.xDot).toBeCloseTo(-0.5, 12);
+        expect(r.yDot).toBeCloseTo(1, 12);
+      });
+    });
+
+    describe("FR-04 cảnh báo tổng tốc độ", () => {
+      it("1.567 không cảnh báo, 1.634 có cảnh báo", () => {
+        expect(exceedsSpeedSum({ vx: 1, vy: 0.5, wz: 0.2 })).toBe(false);
+        expect(exceedsSpeedSum({ vx: 1, vy: 0.5, wz: 0.4 })).toBe(true);
+      });
+    });
+
+    describe("PHY-5 động lực học", () => {
+      it("a = (1, 0), omega_i > 0 -> F_d = 2.425, tau ~ 0.1807", () => {
+        const r = computeDynamics({ ax: 1, ay: 0, wzDot: 0 }, [1, 1, 1, 1]);
+        expect(r.Fx).toBeCloseTo(9.7, 9);
+        for (let i = 0; i < 4; i++) {
+          expect(r.Fd[i]).toBeCloseTo(2.425, 9);
+          expect(r.tau[i]).toBeCloseTo(0.1807, 3);
+          expect(r.over[i]).toBe(false);
+        }
+        expect(r.tauPct[0]).toBeCloseTo((100 * 0.18072) / 0.981, 2);
+      });
+
+      it("omega_i = 0 thì lực cản lăn bằng 0", () => {
+        const r = computeDynamics({ ax: 1, ay: 0, wzDot: 0 }, [0, 0, 0, 0]);
+        expect(r.tau[0]).toBeCloseTo(0.05 * 2.425, 9);
+      });
+
+      it("cờ vượt định mức khi tải lớn", () => {
+        const r = computeDynamics({ ax: 100, ay: 0, wzDot: 0 }, [1, 1, 1, 1]);
+        expect(r.over.every((f) => f)).toBe(true);
+      });
+
+      it("bộ ước lượng hội tụ về a = (1, 0) với vx tăng đều", () => {
+        const est = new DynamicsEstimator();
+        const dt = 0.05;
+        let r = computeDynamics({ ax: 0, ay: 0, wzDot: 0 }, [0, 0, 0, 0]);
+        for (let k = 0; k <= 120; k++) {
+          const v: BodyVel = { vx: k * dt, vy: 0, wz: 0 };
+          r = est.update(v, inverseKinematics(v), dt);
+        }
+        expect(r.ax).toBeCloseTo(1, 6);
+        expect(r.Fd[0]).toBeCloseTo(2.425, 4);
+        expect(r.tau[0]).toBeCloseTo(0.1807, 3);
+      });
+
+      it("thành phần ly tâm: vx = 0.5, wz = 1 không đổi -> ay = 0.5", () => {
+        const est = new DynamicsEstimator();
+        const v: BodyVel = { vx: 0.5, vy: 0, wz: 1 };
+        let r = est.update(v, inverseKinematics(v), 0.05);
+        for (let k = 0; k < 100; k++) r = est.update(v, inverseKinematics(v), 0.05);
+        expect(r.ax).toBeCloseTo(0, 9);
+        expect(r.ay).toBeCloseTo(0.5, 9);
+        expect(r.wzDot).toBeCloseTo(0, 9);
+        expect(r.Fy).toBeCloseTo(4.85, 9);
+      });
+    });
+
+    describe("PHY-6 góc và đích", () => {
+      it("wrapAngle về [-pi, pi]", () => {
+        expect(wrapAngle(0.1 + 2 * Math.PI)).toBeCloseTo(0.1, 9);
+        expect(wrapAngle((3 * Math.PI) / 2)).toBeCloseTo(-Math.PI / 2, 9);
+        expect(wrapAngle((-3 * Math.PI) / 2)).toBeCloseTo(Math.PI / 2, 9);
+        expect(Math.abs(wrapAngle(Math.PI))).toBeCloseTo(Math.PI, 9);
+        expect(wrapAngle(0.5)).toBeCloseTo(0.5, 12);
+      });
+
+      it("kiểu A: đích từ quãng đường và hướng", () => {
+        const a = goalFromDistanceHeading({ x: 1, y: 2, theta: Math.PI / 2 }, 1, 0);
+        expect(a.x).toBeCloseTo(1, 9);
+        expect(a.y).toBeCloseTo(3, 9);
+        expect(a.theta).toBeCloseTo(Math.PI / 2, 12);
+        const b = goalFromDistanceHeading(
+          { x: 1, y: 2, theta: Math.PI / 2 },
+          1,
+          Math.PI / 2,
+        );
+        expect(b.x).toBeCloseTo(0, 9);
+        expect(b.y).toBeCloseTo(2, 9);
+      });
+
+      it("timeout = 3 * T_dự_kiến + 5", () => {
+        const o: Pose = { x: 0, y: 0, theta: 0 };
+        expect(expectedDuration(o, { x: 1, y: 0, theta: 0 }, DEFAULT_RUN_PARAMS)).toBeCloseTo(5, 9);
+        expect(createTrack(o, { x: 1, y: 0, theta: 0 }, DEFAULT_RUN_PARAMS).timeoutS).toBeCloseTo(20, 9);
+        expect(createTrack(o, { x: 0, y: 0, theta: 1 }, DEFAULT_RUN_PARAMS).timeoutS).toBeCloseTo(8, 9);
+      });
+
+      it("tham số không hợp lệ bị từ chối", () => {
+        const o: Pose = { x: 0, y: 0, theta: 0 };
+        expect(() => createTrack(o, o, { ...DEFAULT_RUN_PARAMS, vCruise: 0 })).toThrow(RangeError);
+        expect(() => createTrack(o, o, { ...DEFAULT_RUN_PARAMS, accelAng: NaN })).toThrow(RangeError);
+      });
+    });
+
+    function simulate(start: Pose, goal: Pose, params: RunParams) {
+      const dt = 0.05;
+      let s = createTrack(start, goal, params);
+      let pose: Pose = { ...start };
+      let status: RunStatus = { kind: "running" };
+      let steps = 0;
+      let maxSpeed = 0;
+      let maxDv = 0;
+      let prev = { vx: 0, vy: 0, wz: 0 };
+      while (status.kind === "running" && steps < 4000) {
+        const out = trackStep(s, { pose, dt, stateAgeS: 0.05, armed: true, keyPressed: false });
+        s = out.state;
+        status = out.status;
+        steps++;
+        if (status.kind !== "running") break;
+        const w = bodyToWorld(out.cmd, pose.theta);
+        pose = { x: pose.x + w.xDot * dt, y: pose.y + w.yDot * dt, theta: pose.theta + w.thetaDot * dt };
+        maxSpeed = Math.max(maxSpeed, Math.hypot(out.cmd.vx, out.cmd.vy));
+        maxDv = Math.max(maxDv, Math.hypot(out.cmd.vx - prev.vx, out.cmd.vy - prev.vy) / dt);
+        prev = out.cmd;
+      }
+      return { status, pose, steps, maxSpeed, maxDv, state: s };
+    }
+
+    describe("PHY-6 bộ bám đích trên mô hình tích phân", () => {
+      it("tới đích (có quấn góc) trong dung sai, tham số mặc định", () => {
+        const goal: Pose = { x: -0.5, y: 0.8, theta: 3.0 };
+        const r = simulate({ x: 0, y: 0, theta: -3.0 }, goal, DEFAULT_RUN_PARAMS);
+        expect(r.status).toEqual({ kind: "done" });
+        expect(Math.hypot(goal.x - r.pose.x, goal.y - r.pose.y)).toBeLessThan(0.02);
+        expect(Math.abs(wrapAngle(goal.theta - r.pose.theta))).toBeLessThan(0.035);
+        expect(r.maxSpeed).toBeLessThanOrEqual(DEFAULT_RUN_PARAMS.vCruise + 1e-9);
+        expect(r.maxDv).toBeLessThanOrEqual(DEFAULT_RUN_PARAMS.accelLin + 1e-9);
+        expect(r.state.elapsed).toBeLessThan(r.state.timeoutS);
+      });
+
+      it("tới đích với tham số chạy khác (nhanh hơn)", () => {
+        const params: RunParams = { vCruise: 0.5, wzCruise: 2, accelLin: 2, accelAng: 3 };
+        const goal: Pose = { x: 1.2, y: -0.7, theta: 0.4 };
+        const r = simulate({ x: 0.3, y: 0.3, theta: 0.9 }, goal, params);
+        expect(r.status).toEqual({ kind: "done" });
+        expect(Math.hypot(goal.x - r.pose.x, goal.y - r.pose.y)).toBeLessThan(0.02);
+        expect(Math.abs(wrapAngle(goal.theta - r.pose.theta))).toBeLessThan(0.035);
+      });
+
+      it("chu kỳ đầu giữ hướng vector và bị giới hạn gia tốc", () => {
+        const s = createTrack({ x: 0, y: 0, theta: 0 }, { x: 1, y: 1, theta: 0 }, DEFAULT_RUN_PARAMS);
+        const out = trackStep(s, { pose: { x: 0, y: 0, theta: 0 }, dt: 0.05, stateAgeS: 0, armed: true, keyPressed: false });
+        expect(out.status).toEqual({ kind: "running" });
+        expect(out.cmd.vx).toBeCloseTo(out.cmd.vy, 9);
+        expect(Math.hypot(out.cmd.vx, out.cmd.vy)).toBeCloseTo(0.5 * 0.05, 9);
+      });
+
+      it("xong cần 3 chu kỳ liên tiếp trong dung sai", () => {
+        const g: Pose = { x: 1, y: 1, theta: 0 };
+        let s = createTrack(g, g, DEFAULT_RUN_PARAMS);
+        const input: TrackInput = { pose: g, dt: 0.05, stateAgeS: 0, armed: true, keyPressed: false };
+        const kinds: string[] = [];
+        for (let k = 0; k < 3; k++) {
+          const out = trackStep(s, input);
+          s = out.state;
+          kinds.push(out.status.kind);
+        }
+        expect(kinds).toEqual(["running", "running", "done"]);
+      });
+    });
+
+    describe("PHY-6 các điều kiện hủy", () => {
+      const goal: Pose = { x: 5, y: 0, theta: 0 };
+      const base: TrackInput = {
+        pose: { x: 0, y: 0, theta: 0 },
+        dt: 0.05,
+        stateAgeS: 0.1,
+        armed: true,
+        keyPressed: false,
+      };
+      const fresh = () => createTrack({ x: 0, y: 0, theta: 0 }, goal, DEFAULT_RUN_PARAMS);
+
+      it("state cũ hơn 500 ms", () => {
+        const out = trackStep(fresh(), { ...base, stateAgeS: 0.6 });
+        expect(out.status).toEqual({ kind: "aborted", reason: "stale" });
+        expect(out.cmd).toEqual({ vx: 0, vy: 0, wz: 0 });
+      });
+
+      it("disarm", () => {
+        const out = trackStep(fresh(), { ...base, armed: false });
+        expect(out.status).toEqual({ kind: "aborted", reason: "disarmed" });
+        expect(out.cmd).toEqual({ vx: 0, vy: 0, wz: 0 });
+      });
+
+      it("có phím di chuyển", () => {
+        const out = trackStep(fresh(), { ...base, keyPressed: true });
+        expect(out.status).toEqual({ kind: "aborted", reason: "key" });
+        expect(out.cmd).toEqual({ vx: 0, vy: 0, wz: 0 });
+      });
+
+      it("quá thời gian", () => {
+        const s = fresh();
+        const out = trackStep({ ...s, elapsed: s.timeoutS - 0.01 }, base);
+        expect(out.status).toEqual({ kind: "aborted", reason: "timeout" });
+        expect(out.cmd).toEqual({ vx: 0, vy: 0, wz: 0 });
+      });
+
+      it("không hủy khi mọi điều kiện ổn", () => {
+        expect(trackStep(fresh(), base).status).toEqual({ kind: "running" });
+      });
+    });
+
+    describe("FR-04 chạy theo tốc độ bánh", () => {
+      const w: Wheels = [1.66, -0.34, 4.34, 2.34];
+      const ok = { stateAgeS: 0.05, armed: true, keyPressed: false };
+
+      it("cmd_vel bằng động học thuận, hết giờ thì done với cmd 0", () => {
+        let run = createWheelRun(w, 3);
+        const expected = forwardKinematics(w);
+        let steps = 0;
+        let status: RunStatus = { kind: "running" };
+        while (status.kind === "running" && steps < 1000) {
+          const out = wheelRunStep(run, ok, 0.05);
+          run = out.run;
+          status = out.status;
+          steps++;
+          if (status.kind === "running") {
+            expect(out.cmd.vx).toBeCloseTo(expected.vx, 12);
+            expect(out.cmd.vy).toBeCloseTo(expected.vy, 12);
+            expect(out.cmd.wz).toBeCloseTo(expected.wz, 12);
+          } else {
+            expect(out.cmd).toEqual({ vx: 0, vy: 0, wz: 0 });
+          }
+        }
+        expect(status).toEqual({ kind: "done" });
+        expect(steps).toBeGreaterThanOrEqual(59);
+        expect(steps).toBeLessThanOrEqual(61);
+      });
+
+      it("hủy khi có phím, disarm, state cũ", () => {
+        const run = createWheelRun(w, 3);
+        expect(wheelRunStep(run, { ...ok, keyPressed: true }, 0.05).status).toEqual({ kind: "aborted", reason: "key" });
+        expect(wheelRunStep(run, { ...ok, armed: false }, 0.05).status).toEqual({ kind: "aborted", reason: "disarmed" });
+        expect(wheelRunStep(run, { ...ok, stateAgeS: 0.6 }, 0.05).status).toEqual({ kind: "aborted", reason: "stale" });
+      });
+
+      it("đầu vào không hợp lệ bị từ chối", () => {
+        expect(() => createWheelRun(w, 0)).toThrow(RangeError);
+        expect(() => createWheelRun([1, 2, NaN, 4], 3)).toThrow(RangeError);
+      });
+    });
+  ```
+
+  **Bước 6. Kiểm tra.** Chạy lần lượt trong `app/client` và báo kết quả từng lệnh:
+  1. `npm test`
+     Mong đợi: `Test Files  1 passed (1)` và `Tests  29 passed (29)`, thoát mã 0. Nếu số test khác 29 hoặc có test fail, kiểm tra xem đã chép đúng nguyên văn chưa; nếu đã đúng thì trả `BLOCKED` kèm tên test và thông báo lỗi, không tự sửa công thức hay test.
+  2. `npx tsc --noEmit -p . 2>&1 | grep 'src/robot'`
+     Mong đợi: không có dòng nào in ra (mã thoát của `grep` là 1). Lỗi ở file khác (ngoài `src/robot`) nếu có là có sẵn từ trước, chỉ ghi lại, không sửa.
+  3. `npx eslint src/robot`
+     Mong đợi: không có lỗi hay cảnh báo nào.
+  4. `grep -rn "1\.89" src; echo "exit=$?"`
+     Mong đợi: không in dòng nào ngoài `exit=1` (SAF-01).
+  5. `grep -rnE "from \"(react|next)|document\.|window\." src/robot; echo "exit=$?"`
+     Mong đợi: không in dòng nào ngoài `exit=1` (thư viện thuần, không React hay DOM).
+  6. `git -C /tmp/claude-1000/-home-vth-ws-mecanum-base/76fe0d3b-44a2-4858-8e13-7f99f2566330/scratchpad/wt/T07 status --short` (chỉ đọc)
+     Mong đợi chỉ có: `M app/client/package.json`, `M app/client/package-lock.json`, và `?? app/client/src/robot/`. Có file khác thì báo lại.
+
+  **Báo cáo cuối:** liệt kê file đã chạm, dán kết quả sáu lệnh ở Bước 6, và nêu mọi điểm đã trả `BLOCKED` hoặc chưa rõ.
+
+  **Ghi chú thiết kế (cho người review, Haiku không đổi):**
+  1. Spec không định nghĩa `T_dự_kiến` của PHY-6; Work order dùng `max(quãng đường / vCruise, |góc quay quấn| / wzCruise)`. Timeout = `3·T + 5` s.
+  2. "Giữ hướng vector" được hiểu: thu nhỏ vector tịnh tiến `(vx, vy)` để `|v| <= vCruise`; giới hạn gia tốc cũng thu nhỏ vector thay đổi `(Δvx, Δvy)`; `wz` được kẹp và giới hạn gia tốc riêng. Các kẹp này là tham số lần chạy do người dùng nhập (không chặn trên), không phải giới hạn phần mềm cố định (SAF-04).
+  3. Kiểu A nhận `alpha` theo rad; UI (T11) đổi độ sang rad. Lần chạy theo tốc độ bánh (FR-04) xuất `cmd_vel` cố định từ động học thuận, không giới hạn gia tốc, kết thúc khi hết giờ hoặc bị hủy; hết giờ/hủy đều xuất cmd 0 ở chu kỳ đó (T10 vẫn phải gửi 0 khi dừng).
+  4. `DynamicsEstimator` lọc đạo hàm vận tốc đo (thông thấp bậc 1, `alpha = dt/(τ+dt)`); mẫu đầu tiên chỉ lưu mốc nên gia tốc bằng 0 cho tới mẫu thứ hai.
+  5. `vitest` phải ghim `^4` do xung đột peer với `@types/node@^20` (ghi nhận để T08+ không nâng nhầm).
 
 ### T08 — Kết nối, bàn phím toàn cục, khung ứng dụng
 - Trạng thái: TODO · Plan: P3 · Phụ thuộc: T06, T07
