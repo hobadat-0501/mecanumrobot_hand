@@ -79,7 +79,7 @@ export default function Home() {
         </Panel>
 
         <div className="flex flex-col gap-4 lg:col-span-2">
-          <Panel title="Vận tốc đo" description="Đơn vị web, thân robot">
+          <Panel title="Vận tốc đo" description="Vận tốc thân robot đo được">
             <ReadoutGrid>
               <Readout label="vx" value={fmt(state?.vel?.vx, 3)} unit="m/s" dim={dim} />
               <Readout label="vy" value={fmt(state?.vel?.vy, 3)} unit="m/s" dim={dim} />
@@ -87,7 +87,7 @@ export default function Home() {
             </ReadoutGrid>
           </Panel>
 
-          <Panel title="Tư thế" description="Odometry trên app server">
+          <Panel title="Tư thế" description="Vị trí và hướng ước lượng từ odometry">
             <ReadoutGrid>
               <Readout label="x" value={fmt(state?.pose.x, 3)} unit="m" dim={dim} />
               <Readout label="y" value={fmt(state?.pose.y, 3)} unit="m" dim={dim} />
@@ -102,7 +102,7 @@ export default function Home() {
 
           <Panel
             title="Lệnh hiện hành"
-            description="cmd_vel đang áp dụng ở app server"
+            description="Vận tốc đang được điều khiển"
             action={
               <StatusBadge tone={shell.source === "idle" ? "idle" : "ok"}>
                 {SOURCE_LABEL[shell.source]}
@@ -115,7 +115,7 @@ export default function Home() {
               <Readout label="wz" value={fmt(state?.cmd.wz, 3)} unit="rad/s" dim={dim} />
             </ReadoutGrid>
             <p className="mt-2 text-xs text-muted-foreground">
-              Nguồn lệnh tính ở máy này (bàn phím hoặc lần chạy tự động).
+              Nguồn điều khiển: bàn phím hoặc lần chạy tự động.
             </p>
           </Panel>
         </div>

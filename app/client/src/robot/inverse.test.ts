@@ -4,6 +4,7 @@ import { Arbiter } from "./control";
 import {
   DEFAULT_FIELDS,
   InverseRun,
+  planInverse,
   computeProgress,
   degToRad,
   parseInverseFields,
@@ -14,7 +15,7 @@ import {
 import type { InverseFields, ParsedInput } from "./inverse";
 import { bodyToWorld, inverseKinematics } from "./mecanum";
 import type { Pose } from "./mecanum";
-import { CONTROL_HZ, TOL_ANG, TOL_POS, trackError, wrapAngle } from "./motion";
+import { CONTROL_HZ, DEFAULT_RUN_PARAMS, TOL_ANG, TOL_POS, trackError, wrapAngle } from "./motion";
 
 const DT = 1 / CONTROL_HZ;
 
@@ -38,9 +39,9 @@ describe("đổi đơn vị và phân tích ô nhập", () => {
     }
   });
 
-  it("mặc định hợp lệ, tham số chạy lấy từ DEFAULT_RUN_PARAMS", () => {
+  it("mặc định hợp lệ, thời gian 5 s", () => {
     const v = parsed("distance");
-    expect(v.params).toEqual({ vCruise: 0.2, wzCruise: 1 });
+    expect(v.durationS).toBe(5);
     expect(v.target).toEqual({ kind: "distance", s: 0.5, alpha: 0 });
   });
 
@@ -52,17 +53,16 @@ describe("đổi đơn vị và phân tích ô nhập", () => {
     }
   });
 
-  it("không có chặn trên cho tham số chạy (SAF-04)", () => {
-    const v = parsed("distance", { vCruise: "1000", wzCruise: "1e6" });
-    expect(v.params.vCruise).toBe(1000);
-    expect(v.params.wzCruise).toBe(1e6);
+  it("không có chặn dưới cho thời gian (SAF-04): 1e-3 s vẫn nhận", () => {
+    const v = parsed("distance", { duration: "0.001" });
+    expect(v.durationS).toBe(0.001);
   });
 
   it("ô rỗng, chữ, 0 hoặc âm: lỗi, không có NaN", () => {
     for (const bad of ["", "abc", "0", "-1", "NaN"]) {
-      const r = parseInverseFields("distance", { ...DEFAULT_FIELDS, vCruise: bad });
+      const r = parseInverseFields("distance", { ...DEFAULT_FIELDS, duration: bad });
       expect(r.ok).toBe(false);
-      if (!r.ok) expect(r.errors.vCruise).toBeDefined();
+      if (!r.ok) expect(r.errors.duration).toBeDefined();
     }
     const r = parseInverseFields("pose", { ...DEFAULT_FIELDS, x: "", theta: "x" });
     expect(r.ok).toBe(false);
@@ -122,7 +122,7 @@ function simulate(
   lag = 0.1,
 ): { pose: Pose; ended: boolean; done: boolean; maxOvershoot: number; run: InverseRun; steps: number } {
   const goal = resolveGoal(input.target, start);
-  const run = new InverseRun(start, goal, input.params);
+  const run = new InverseRun(start, goal, planInverse(input.target, input.durationS, start)!.params);
   const arb = new Arbiter();
   expect(arb.startRun(run, "inverse")).toBe(true);
   let pose = { ...start };
@@ -189,8 +189,8 @@ describe("vòng kín: bộ điều khiển với ô nhập đã phân tích", ()
     expect(r.run.progress().percent).toBe(100);
   });
 
-  it("tham số lớn vẫn tới đích (không chặn trên)", () => {
-    const input = parsed("pose", { x: "1", y: "-1", theta: "-90", vCruise: "5" });
+  it("thời gian rất ngắn (tốc độ lớn) vẫn tới đích", () => {
+    const input = parsed("pose", { x: "1", y: "-1", theta: "-90", duration: "0.5" });
     const r = simulate({ x: 0, y: 0, theta: 0 }, input, 0.02);
     expect(r.done).toBe(true);
   });
@@ -198,22 +198,22 @@ describe("vòng kín: bộ điều khiển với ô nhập đã phân tích", ()
 
 describe("InverseRun", () => {
   it("bốn tốc độ bánh khớp động học ngược của lệnh đang gửi", () => {
-    const run = new InverseRun({ x: 0, y: 0, theta: 0 }, { x: 1, y: 0, theta: 0 }, parsed("distance").params);
+    const run = new InverseRun({ x: 0, y: 0, theta: 0 }, { x: 1, y: 0, theta: 0 }, DEFAULT_RUN_PARAMS);
     run.step({ dt: DT, pose: { x: 0, y: 0, theta: 0 }, stateAgeS: 0, armed: true, keyPressed: false });
     expect(run.wheels()).toEqual(inverseKinematics(run.lastCmd));
     expect(run.lastCmd.vx).toBeGreaterThan(0);
   });
 
   it("T_expected = max(quãng đường / v, góc / wz)", () => {
-    const run = new InverseRun({ x: 0, y: 0, theta: 0 }, { x: 0.5, y: 0, theta: 0 }, parsed("distance").params);
+    const run = new InverseRun({ x: 0, y: 0, theta: 0 }, { x: 0.5, y: 0, theta: 0 }, DEFAULT_RUN_PARAMS);
     expect(run.tExpected).toBeCloseTo(2.5, 12);
   });
 
   it("không có tư thế hoặc state cũ thì hủy, lệnh 0", () => {
-    const run = new InverseRun({ x: 0, y: 0, theta: 0 }, { x: 1, y: 0, theta: 0 }, parsed("distance").params);
+    const run = new InverseRun({ x: 0, y: 0, theta: 0 }, { x: 1, y: 0, theta: 0 }, DEFAULT_RUN_PARAMS);
     const s1 = run.step({ dt: DT, pose: null, stateAgeS: 0, armed: true, keyPressed: false });
     expect(s1.status).toEqual({ kind: "aborted", reason: "stale" });
-    const run2 = new InverseRun({ x: 0, y: 0, theta: 0 }, { x: 1, y: 0, theta: 0 }, parsed("distance").params);
+    const run2 = new InverseRun({ x: 0, y: 0, theta: 0 }, { x: 1, y: 0, theta: 0 }, DEFAULT_RUN_PARAMS);
     const s2 = run2.step({ dt: DT, pose: { x: 0, y: 0, theta: 0 }, stateAgeS: 0.6, armed: true, keyPressed: false });
     expect(s2.status).toEqual({ kind: "aborted", reason: "stale" });
     expect(s2.cmd).toEqual({ vx: 0, vy: 0, wz: 0 });
@@ -223,5 +223,37 @@ describe("InverseRun", () => {
     expect(
       () => new InverseRun({ x: 0, y: 0, theta: 0 }, { x: 1, y: 0, theta: 0 }, { vCruise: NaN, wzCruise: 1 }),
     ).toThrow(RangeError);
+  });
+});
+
+describe("planInverse: tốc độ suy ra từ quãng đường và thời gian", () => {
+  it("kiểu A tiến thẳng 0.5 m trong 5 s: vx = 0.1, bốn bánh cùng tốc độ", () => {
+    const p = planInverse(parsed("distance").target, 5, null)!;
+    expect(p.body.vx).toBeCloseTo(0.1, 12);
+    expect(p.body.vy).toBeCloseTo(0, 12);
+    expect(p.body.wz).toBe(0);
+    expect(p.params.vCruise).toBeCloseTo(0.1, 12);
+    for (const w of p.wheels) expect(w).toBeCloseTo(0.1 / 0.05, 9);
+    expect(p.distance).toBeCloseTo(0.5, 12);
+  });
+
+  it("kiểu A hướng 90 độ: đi ngang sang trái vy = s/T", () => {
+    const p = planInverse(parsed("distance", { heading: "90" }).target, 2, null)!;
+    expect(p.body.vx).toBeCloseTo(0, 9);
+    expect(p.body.vy).toBeCloseTo(0.25, 9);
+  });
+
+  it("kiểu B cần tư thế hiện tại; có thì tính theo khung thân", () => {
+    const t = parsed("pose", { x: "1", y: "0", theta: "90" }).target;
+    expect(planInverse(t, 2, null)).toBeNull();
+    const p = planInverse(t, 2, { x: 0, y: 0, theta: 0 })!;
+    expect(p.body.vx).toBeCloseTo(0.5, 9);
+    expect(p.body.wz).toBeCloseTo(Math.PI / 4, 9);
+    expect(p.params.wzCruise).toBeCloseTo(Math.PI / 4, 9);
+  });
+
+  it("thời gian không hợp lệ thì null", () => {
+    expect(planInverse(parsed("distance").target, 0, null)).toBeNull();
+    expect(planInverse(parsed("distance").target, NaN, null)).toBeNull();
   });
 });
