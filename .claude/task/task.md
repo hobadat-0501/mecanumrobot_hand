@@ -7754,9 +7754,9 @@ Trạng thái: `TODO → ORDERED → CODED → PASS → MERGED` hoặc `BLOCKED`
 - Work order: _(Sonnet điền)_
 
 ### T12 — Động lực học
-- Trạng thái: TODO · Plan: P4 · Phụ thuộc: T09
+- Trạng thái: MERGED · Plan: P4 · Phụ thuộc: T09
 - Spec: FR-07, PHY-5
-- File: `app/client/src/app/dynamics/page.tsx`, `app/client/src/components/robot/charts.tsx`
+- File: `app/client/src/app/dynamics/page.tsx`, `app/client/src/components/robot/charts.tsx` (khu 2), `app/client/src/robot/{dynamics,dynamics.test}.ts`, `app/client/src/robot/mecanum.ts` (ước lượng chịu lỗi dữ liệu), `app/client/src/robot/mecanum.test.ts` không đổi
 - Đạt khi: hiện realtime Fx, Fy, Mz, F_d và τ từng bánh, % định mức, có cảnh báo.
 - Work order: _(Sonnet điền)_
 

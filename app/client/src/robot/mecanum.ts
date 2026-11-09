@@ -146,10 +146,20 @@ export function computeDynamics(
   };
 }
 
+/** Khoảng cách giữa hai mẫu lớn hơn ngưỡng này (s) là mất dữ liệu: bộ ước lượng tự reset. */
+export const ESTIMATOR_MAX_GAP = 0.5;
+
+function isFiniteVel(v: BodyVel): boolean {
+  return Number.isFinite(v.vx) && Number.isFinite(v.vy) && Number.isFinite(v.wz);
+}
+
 /**
  * PHY-5: ước lượng động lực học từ vận tốc đo. Đạo hàm vận tốc được lọc thông
  * thấp bậc 1 (hằng số thời gian `tau`, mặc định 0.1 s). Gọi `update` mỗi lần có
  * mẫu vận tốc mới, kèm dt (s) kể từ mẫu trước.
+ *
+ * Chịu lỗi dữ liệu: mẫu không hữu hạn hoặc có dt <= 0 (đảo thứ tự, trùng) bị bỏ, kết quả
+ * trước đó được giữ nguyên; dt > ESTIMATOR_MAX_GAP coi là mất dữ liệu nên reset rồi bắt đầu lại.
  */
 export class DynamicsEstimator {
   private readonly tauFilter: number;
@@ -157,6 +167,7 @@ export class DynamicsEstimator {
   private vxDot = 0;
   private vyDot = 0;
   private wzDotF = 0;
+  private last: DynamicsResult = computeDynamics({ ax: 0, ay: 0, wzDot: 0 }, [0, 0, 0, 0]);
 
   constructor(tauFilter: number = FILTER_TAU) {
     this.tauFilter = tauFilter;
@@ -167,20 +178,21 @@ export class DynamicsEstimator {
     this.vxDot = 0;
     this.vyDot = 0;
     this.wzDotF = 0;
+    this.last = computeDynamics({ ax: 0, ay: 0, wzDot: 0 }, [0, 0, 0, 0]);
   }
 
   /** `v` là vận tốc đo (đơn vị web), `wheels` là tốc độ bánh (rad/s) tương ứng. */
   update(v: BodyVel, wheels: Wheels, dt: number): DynamicsResult {
-    if (Number.isFinite(dt) && dt > 0) {
-      if (this.prev !== null) {
-        const alpha = dt / (this.tauFilter + dt);
-        this.vxDot += alpha * ((v.vx - this.prev.vx) / dt - this.vxDot);
-        this.vyDot += alpha * ((v.vy - this.prev.vy) / dt - this.vyDot);
-        this.wzDotF += alpha * ((v.wz - this.prev.wz) / dt - this.wzDotF);
-      }
-      this.prev = { vx: v.vx, vy: v.vy, wz: v.wz };
+    if (!isFiniteVel(v) || !Number.isFinite(dt) || dt <= 0) return this.last;
+    if (dt > ESTIMATOR_MAX_GAP) this.reset();
+    if (this.prev !== null) {
+      const alpha = dt / (this.tauFilter + dt);
+      this.vxDot += alpha * ((v.vx - this.prev.vx) / dt - this.vxDot);
+      this.vyDot += alpha * ((v.vy - this.prev.vy) / dt - this.vyDot);
+      this.wzDotF += alpha * ((v.wz - this.prev.wz) / dt - this.wzDotF);
     }
-    return computeDynamics(
+    this.prev = { vx: v.vx, vy: v.vy, wz: v.wz };
+    this.last = computeDynamics(
       {
         ax: this.vxDot - v.wz * v.vy,
         ay: this.vyDot + v.wz * v.vx,
@@ -188,5 +200,6 @@ export class DynamicsEstimator {
       },
       wheels,
     );
+    return this.last;
   }
 }
