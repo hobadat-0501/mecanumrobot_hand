@@ -5,7 +5,7 @@ back-off. The only thing sent down is `cmd_vel` with exactly the keys t, seq, vx
 wire units. Outbound commands are latest-only: one slot, newer replaces older, so no backlog
 can build up (NFR-03). A command is never stored while the link is down or carried across a
 reconnect (SAF-03). Incoming `state` messages are handed to `on_state`; binary frames are
-ignored until T13.
+forwarded to `on_scan` unchanged after a size/type check (PROTO-2).
 """
 
 from __future__ import annotations
@@ -20,6 +20,10 @@ from websockets.asyncio.client import connect
 log = logging.getLogger("app_server.robot_link")
 
 MAX_MESSAGE_BYTES = 1 << 20
+# Scan frame layout (PROTO-2), see robot_agent.server: u8 type, u8 ver, u32 seq, u64 t_mono_ms,
+# then 360 x u16. The frame is relayed byte for byte; only type and size are checked here.
+SCAN_FRAME_TYPE = 2
+SCAN_FRAME_SIZE = 14 + 2 * 360
 
 
 class RobotLink:
@@ -29,6 +33,7 @@ class RobotLink:
         token: str,
         *,
         on_state: Callable[[Dict[str, Any]], None],
+        on_scan: Optional[Callable[[bytes], None]] = None,
         on_connect: Optional[Callable[[], None]] = None,
         on_disconnect: Optional[Callable[[], None]] = None,
         backoff_initial_s: float = 0.2,
@@ -40,6 +45,7 @@ class RobotLink:
         self._url = url
         self._headers = {"Authorization": "Bearer " + token}
         self._on_state = on_state
+        self._on_scan = on_scan
         self._on_connect = on_connect
         self._on_disconnect = on_disconnect
         self._backoff_initial_s = backoff_initial_s
@@ -146,7 +152,16 @@ class RobotLink:
     async def _receive_loop(self, ws: Any) -> None:
         async for message in ws:
             if not isinstance(message, str):
-                continue  # binary scan frames arrive in T13
+                if (
+                    self._on_scan is not None
+                    and len(message) == SCAN_FRAME_SIZE
+                    and message[0] == SCAN_FRAME_TYPE
+                ):
+                    try:
+                        self._on_scan(bytes(message))
+                    except Exception:
+                        log.exception("robot scan handler failed")
+                continue
             try:
                 data = json.loads(message)
             except (ValueError, RecursionError):

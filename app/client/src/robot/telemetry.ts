@@ -165,6 +165,67 @@ export class HistoryBuffer {
   }
 }
 
+// ---- LiDAR (FR-10): thống kê scan, tốc độ nhận, tuổi dữ liệu ----
+
+/** Quá ngưỡng này không có scan mới thì coi là mất dữ liệu LiDAR (scan tới 5 đến 10 Hz). */
+export const SCAN_STALE_MS = 1000;
+
+export type ScanStatus = "live" | "stale" | "none";
+
+/** `ageMs` là tuổi scan gần nhất; null nếu chưa nhận scan nào. */
+export function scanStatus(ageMs: number | null, thresholdMs: number = SCAN_STALE_MS): ScanStatus {
+  if (ageMs === null) return "none";
+  return isStale(ageMs, thresholdMs) ? "stale" : "live";
+}
+
+export interface ScanStats {
+  /** Số ô có điểm (khác 0). */
+  count: number;
+  /** Khoảng cách gần nhất (mm) và góc ô đó (độ, 0 là phía trước, ngược chiều kim đồng hồ); null nếu không có điểm. */
+  nearestMm: number | null;
+  nearestDeg: number | null;
+}
+
+export function scanStats(ranges: ArrayLike<number>): ScanStats {
+  let count = 0;
+  let nearestMm: number | null = null;
+  let nearestDeg: number | null = null;
+  for (let i = 0; i < ranges.length; i++) {
+    const mm = ranges[i];
+    if (mm === 0) continue;
+    count += 1;
+    if (nearestMm === null || mm < nearestMm) {
+      nearestMm = mm;
+      nearestDeg = i;
+    }
+  }
+  return { count, nearestMm, nearestDeg };
+}
+
+/** Tốc độ nhận (Hz) trên cửa sổ trượt; 0 khi chưa đủ hai mẫu hoặc mẫu cuối đã cũ. */
+export class RateMeter {
+  private times: number[] = [];
+
+  constructor(private readonly windowMs = 2000) {}
+
+  tick(nowMs: number): void {
+    this.times.push(nowMs);
+    const cutoff = nowMs - this.windowMs;
+    while (this.times.length > 0 && this.times[0] < cutoff) this.times.shift();
+  }
+
+  rate(nowMs: number): number {
+    const n = this.times.length;
+    if (n < 2 || nowMs - this.times[n - 1] > this.windowMs / 2) return 0;
+    const span = this.times[n - 1] - this.times[0];
+    return span > 0 ? ((n - 1) * 1000) / span : 0;
+  }
+
+  clear(): void {
+    this.times = [];
+  }
+}
+
 // ---- sức khỏe thiết bị (health do robot gửi, trường tự do) ----
 
 export interface DeviceHealth {

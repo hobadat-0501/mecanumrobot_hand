@@ -471,20 +471,178 @@ export function ForceHistoryChart({ className }: { className?: string }) {
 //
 //
 // ================================================================================================
-// KHU 3: LIDAR DẠNG POLAR (T13, FR-10). RỖNG. Nhánh T13 chỉ thêm mã vào khu này.
+// KHU 3: LIDAR DẠNG POLAR (T13, FR-10). Nhánh T13 chỉ thêm mã vào khu này.
 // ================================================================================================
 //
-// (chỗ dành cho biểu đồ polar LiDAR của T13)
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
+import { SCAN_BINS } from "@/robot/protocol";
+import { getScan, getScanAgeMs, subscribeScan } from "@/robot/store";
+import { scanStatus } from "@/robot/telemetry";
+
+const SCAN_REPAINT_MS = 250; // vẽ lại định kỳ để thấy trạng thái mất dữ liệu khi scan ngừng tới
+
+/** Bán kính lưới (m) làm tròn lên bội của 1 m (tối thiểu 2 m) sao cho chứa điểm xa nhất. */
+export function scanRangeM(maxMm: number): number {
+  return Math.max(2, Math.ceil(maxMm / 1000));
+}
+
+function drawScan(canvas: HTMLCanvasElement, colors: ChartColors): void {
+  const ctx = canvas.getContext("2d");
+  if (ctx === null) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth;
+  const h = canvas.clientHeight;
+  if (w === 0 || h === 0) return;
+  const pw = Math.round(w * dpr);
+  const ph = Math.round(h * dpr);
+  if (canvas.width !== pw || canvas.height !== ph) {
+    canvas.width = pw;
+    canvas.height = ph;
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+
+  const scan = getScan();
+  const status = scanStatus(getScanAgeMs());
+  let maxMm = 0;
+  let nearestMm = 0;
+  let nearestIdx = -1;
+  if (scan !== null) {
+    for (let i = 0; i < SCAN_BINS; i++) {
+      const mm = scan.ranges[i];
+      if (mm === 0) continue;
+      if (mm > maxMm) maxMm = mm;
+      if (nearestIdx < 0 || mm < nearestMm) {
+        nearestMm = mm;
+        nearestIdx = i;
+      }
+    }
+  }
+  const rangeM = scanRangeM(maxMm);
+  const cx = w / 2;
+  const cy = h / 2;
+  const radius = Math.min(w, h) / 2 - 22;
+  const scale = radius / rangeM; // px mỗi mét
+  // Robot nhìn lên trên (x tiến); góc tăng ngược chiều kim đồng hồ nên y của robot (trái) ở bên trái màn hình.
+  const toPx = (angleRad: number, metres: number): [number, number] => [
+    cx - Math.sin(angleRad) * metres * scale,
+    cy - Math.cos(angleRad) * metres * scale,
+  ];
+
+  // Vòng khoảng cách mỗi 1 m (hoặc thưa hơn khi xa) và nhãn.
+  const ringStep = rangeM > 6 ? 2 : 1;
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = colors.grid;
+  ctx.fillStyle = colors.text;
+  ctx.font = "10px ui-monospace, monospace";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  for (let m = ringStep; m <= rangeM; m += ringStep) {
+    ctx.beginPath();
+    ctx.arc(cx, cy, m * scale, 0, 2 * Math.PI);
+    ctx.stroke();
+    ctx.fillText(`${m} m`, cx + 3, cy - m * scale + 2);
+  }
+  // Tia mỗi 45 độ, nhãn ở mép.
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  for (let deg = 0; deg < 360; deg += 45) {
+    const [ex, ey] = toPx((deg * Math.PI) / 180, rangeM);
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(ex, ey);
+    ctx.stroke();
+    const [lx, ly] = toPx((deg * Math.PI) / 180, rangeM + 11 / scale);
+    ctx.fillText(`${deg}°`, lx, ly);
+  }
+
+  // Điểm quét. Mờ đi khi dữ liệu đã cũ.
+  if (scan !== null) {
+    ctx.globalAlpha = status === "live" ? 1 : 0.3;
+    ctx.fillStyle = colors.path;
+    for (let i = 0; i < SCAN_BINS; i++) {
+      const mm = scan.ranges[i];
+      if (mm === 0) continue;
+      const [px, py] = toPx((i * Math.PI) / 180, mm / 1000);
+      ctx.fillRect(px - 1.5, py - 1.5, 3, 3);
+    }
+    ctx.globalAlpha = 1;
+    if (nearestIdx >= 0) {
+      // Điểm gần nhất: đoạn nối từ robot và vòng đánh dấu.
+      const [nx, ny] = toPx((nearestIdx * Math.PI) / 180, nearestMm / 1000);
+      ctx.globalAlpha = status === "live" ? 1 : 0.3;
+      ctx.strokeStyle = colors.marker;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(nx, ny);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.arc(nx, ny, 6, 0, 2 * Math.PI);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  // Robot: mũi tên hướng về phía trước (lên trên).
+  ctx.fillStyle = colors.marker;
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - 9);
+  ctx.lineTo(cx + 6, cy + 6);
+  ctx.lineTo(cx, cy + 3);
+  ctx.lineTo(cx - 6, cy + 6);
+  ctx.closePath();
+  ctx.fill();
+
+  if (status !== "live") {
+    ctx.fillStyle = colors.marker;
+    ctx.font = "600 14px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(status === "stale" ? "Mất dữ liệu" : "Chưa có scan", cx, cy + radius * 0.45);
+  }
+}
+
+/** Scan LiDAR dạng polar: vẽ lại theo khung hình khi có scan mới, đổi kích thước, hoặc định kỳ để báo mất dữ liệu. */
+export function PolarScanChart({ className }: { className?: string }) {
+  const ref = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = ref.current;
+    if (canvas === null) return;
+    let frame = 0;
+    const paint = () => {
+      frame = 0;
+      drawScan(canvas, readColors(canvas));
+    };
+    const schedule = () => {
+      if (frame === 0) frame = requestAnimationFrame(paint);
+    };
+    const unsubscribe = subscribeScan(schedule);
+    const observer = new ResizeObserver(schedule);
+    observer.observe(canvas);
+    const timer = setInterval(schedule, SCAN_REPAINT_MS);
+    schedule();
+    return () => {
+      unsubscribe();
+      observer.disconnect();
+      clearInterval(timer);
+      if (frame !== 0) cancelAnimationFrame(frame);
+    };
+  }, []);
+
+  return (
+    <canvas
+      ref={ref}
+      role="img"
+      aria-label="Quét LiDAR dạng polar quanh robot, phía trước ở trên"
+      className={cn("block h-full w-full", className)}
+    />
+  );
+}
+
+
 // ================================================================================================
 // HẾT FILE. Không thêm mã bên dưới dòng này.
 // ================================================================================================

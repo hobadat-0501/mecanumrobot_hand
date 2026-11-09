@@ -72,6 +72,38 @@ export function parseServerMessage(text: string): StateMsg | null {
   return data as unknown as StateMsg;
 }
 
+// PROTO-2: khung nhị phân `scan` (robot -> app server -> web, chuyển nguyên vẹn), little-endian.
+// Đầu khung: type u8, ver u8, seq u32, t_mono_ms u64 (14 byte); thân: 360 x u16 mm, 0 là không có điểm.
+// Ô i ứng với góc i độ: ô 0 ở phía trước robot (trục x), tăng dần ngược chiều kim đồng hồ.
+// Hằng số khớp robot/robot_agent/server.py.
+export const SCAN_FRAME_TYPE = 2;
+export const SCAN_FRAME_VER = 1;
+export const SCAN_BINS = 360;
+export const SCAN_HEADER_BYTES = 14;
+export const SCAN_FRAME_BYTES = SCAN_HEADER_BYTES + 2 * SCAN_BINS;
+
+export interface ScanFrame {
+  seq: number;
+  /** Thời điểm mẫu theo đồng hồ đơn điệu của robot (ms); chỉ để so sánh, không phải giờ thực. */
+  tMonoMs: number;
+  /** Khoảng cách mm theo ô 1 độ; 0 là không có điểm. */
+  ranges: Uint16Array;
+}
+
+/** Giải mã khung scan. Trả null nếu sai kích thước, sai loại hoặc sai phiên bản (bỏ qua, không ném lỗi). */
+export function decodeScanFrame(buffer: ArrayBuffer): ScanFrame | null {
+  if (!(buffer instanceof ArrayBuffer) || buffer.byteLength !== SCAN_FRAME_BYTES) return null;
+  const view = new DataView(buffer);
+  if (view.getUint8(0) !== SCAN_FRAME_TYPE || view.getUint8(1) !== SCAN_FRAME_VER) return null;
+  const ranges = new Uint16Array(SCAN_BINS);
+  for (let i = 0; i < SCAN_BINS; i++) ranges[i] = view.getUint16(SCAN_HEADER_BYTES + 2 * i, true);
+  return {
+    seq: view.getUint32(2, true),
+    tMonoMs: Number(view.getBigUint64(6, true)),
+    ranges,
+  };
+}
+
 export interface LocationLike {
   protocol: string;
   hostname: string;

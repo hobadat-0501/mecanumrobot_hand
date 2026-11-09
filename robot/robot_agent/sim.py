@@ -112,8 +112,70 @@ class SimulatedStm32:
             )
 
 
+# Synthetic scene for the simulated LiDAR (metres, robot at SCENE_ORIGIN looking along +x, angles
+# counter-clockwise): a 5 x 3.6 m room, a box on the right-front side and a pillar that orbits.
+_ROOM = (-2.5, 2.5, -1.8, 1.8)  # xmin, xmax, ymin, ymax
+_BOX = (0.8, 1.3, -0.9, -0.3)
+_PILLAR_CENTER = (1.0, 0.9)
+_PILLAR_ORBIT_M = 0.3
+_PILLAR_RADIUS_M = 0.2
+_PILLAR_PERIOD_S = 6.0
+_ORIGIN = (-0.5, 0.2)
+
+
+def _ray_box(ox: float, oy: float, dx: float, dy: float, box: tuple) -> float:
+    """Distance along a ray to the nearest wall of an axis-aligned box, inf if none."""
+    xmin, xmax, ymin, ymax = box
+    best = math.inf
+    for wall, o, d, lo, hi, po, pd in (
+        (xmin, ox, dx, ymin, ymax, oy, dy),
+        (xmax, ox, dx, ymin, ymax, oy, dy),
+        (ymin, oy, dy, xmin, xmax, ox, dx),
+        (ymax, oy, dy, xmin, xmax, ox, dx),
+    ):
+        if abs(d) < 1e-12:
+            continue
+        t = (wall - o) / d
+        if t <= 0.0:
+            continue
+        other = po + pd * t
+        if lo <= other <= hi and t < best:
+            best = t
+    return best
+
+
+def _ray_circle(ox: float, oy: float, dx: float, dy: float, cx: float, cy: float, r: float) -> float:
+    fx, fy = ox - cx, oy - cy
+    b = fx * dx + fy * dy
+    c = fx * fx + fy * fy - r * r
+    disc = b * b - c
+    if disc < 0.0:
+        return math.inf
+    t = -b - math.sqrt(disc)
+    return t if t > 0.0 else math.inf
+
+
+def synthetic_ranges(t_s: float) -> list[float]:
+    """Range in metres for each whole degree 0..359 of the scene at time t_s."""
+    phase = 2.0 * math.pi * t_s / _PILLAR_PERIOD_S
+    cx = _PILLAR_CENTER[0] + _PILLAR_ORBIT_M * math.cos(phase)
+    cy = _PILLAR_CENTER[1] + _PILLAR_ORBIT_M * math.sin(phase)
+    ox, oy = _ORIGIN
+    ranges = []
+    for degree in range(360):
+        angle = math.radians(degree)
+        dx, dy = math.cos(angle), math.sin(angle)
+        distance = min(
+            _ray_box(ox, oy, dx, dy, _ROOM),
+            _ray_box(ox, oy, dx, dy, _BOX),
+            _ray_circle(ox, oy, dx, dy, cx, cy, _PILLAR_RADIUS_M),
+        )
+        ranges.append(distance)
+    return ranges
+
+
 class SimulatedLidar:
-    """A fake 360 point scan, one new scan every period_s (default 10 Hz)."""
+    """A synthetic room scan (see synthetic_ranges), one new scan every period_s (default 10 Hz)."""
 
     def __init__(
         self,
@@ -157,16 +219,11 @@ class SimulatedLidar:
                 return None
             t_ns = self._t0_ns + index * self._period_ns
             if self._scan is None or self._scan.t_ns != t_ns:
-                wobble = 0.05 * math.sin(index / 5.0)
+                ranges = synthetic_ranges((t_ns - self._t0_ns) / 1e9)
                 points = tuple(
-                    LidarPoint(
-                        t_ns,
-                        math.radians(degree),
-                        2.0 + 0.5 * math.sin(math.radians(2 * degree)) + wobble,
-                        100,
-                        0,
-                    )
-                    for degree in range(360)
+                    LidarPoint(t_ns, math.radians(degree), metres, 100, 0)
+                    for degree, metres in enumerate(ranges)
+                    if math.isfinite(metres)
                 )
                 self._scan = LidarScan(t_ns, points)
             return self._scan

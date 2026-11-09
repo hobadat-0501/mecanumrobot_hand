@@ -1,6 +1,7 @@
 import asyncio
 import json
 import math
+import struct
 import time
 from contextlib import asynccontextmanager
 from http import HTTPStatus
@@ -711,6 +712,11 @@ class FakeRobot:
         for conn in self.live():
             await conn.close()
 
+    async def send_binary(self, data):
+        live = self.live()
+        if live:
+            await live[-1].send(data)
+
     async def send_state(self, message):
         live = self.live()
         if live:
@@ -852,6 +858,11 @@ def assert_web_units_only(texts, wire_values):
 # ---- Hub: a slow client must not block the others ----
 
 
+def scan_frame(seq, mm=1500):
+    """A PROTO-2 scan frame: type 2, ver 1, seq, t_mono_ms, 360 x u16 mm."""
+    return struct.pack("<BBIQ", 2, 1, seq, seq * 100) + struct.pack("<360H", *([mm] * 360))
+
+
 class FakeWs:
     def __init__(self, blocked=False):
         self.sent = []
@@ -862,6 +873,10 @@ class FakeWs:
     async def send_text(self, text):
         await self.gate.wait()
         self.sent.append(text)
+
+    async def send_bytes(self, data):
+        await self.gate.wait()
+        self.sent.append(data)
 
 
 async def test_slow_client_gets_only_the_latest_and_blocks_nobody():
@@ -878,6 +893,23 @@ async def test_slow_client_gets_only_the_latest_and_blocks_nobody():
     slow.gate.set()
     await wait_until(lambda: len(slow.sent) == 2)
     assert [json.loads(t)["last_cmd_seq"] for t in slow.sent] == [1, 5]  # in flight + latest
+    hub.remove("fast")
+    hub.remove("slow")
+
+
+async def test_slow_client_gets_only_the_latest_scan_and_blocks_nobody():
+    hub = Hub()
+    fast, slow = FakeWs(), FakeWs(blocked=True)
+    hub.add("fast", fast)
+    hub.add("slow", slow)
+    for n in range(1, 6):
+        hub.publish_scan(scan_frame(n))
+        await asyncio.sleep(0.01)
+    assert fast.sent == [scan_frame(n) for n in range(1, 6)]
+    assert slow.sent == []
+    slow.gate.set()
+    await wait_until(lambda: len(slow.sent) == 2)
+    assert slow.sent == [scan_frame(1), scan_frame(5)]  # in flight + latest, no backlog
     hub.remove("fast")
     hub.remove("slow")
 
@@ -1284,6 +1316,83 @@ async def test_end_to_end_with_the_real_robot_server_and_simulator(robot):
     finally:
         await real.close()
         stm.stop()
+
+
+# ---- LiDAR scan relay (PROTO-2) ----
+
+
+async def recv_binary(ws, timeout=2.0):
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AssertionError("no binary frame received")
+        message = await asyncio.wait_for(ws.recv(), remaining)
+        if isinstance(message, bytes):
+            return message
+
+
+async def test_scan_frame_reaches_operator_and_viewer_unchanged(robot):
+    async with running_app(robot.url) as app:
+        async with operator(app) as driver, operator(app, drive=False) as viewer:
+            await wait_until(lambda: app.runtime.link.connected and len(app.runtime.hub) == 2)
+            frame = scan_frame(7, mm=2345)
+            await robot.send_binary(frame)
+            assert await recv_binary(driver) == frame
+            assert await recv_binary(viewer) == frame
+
+
+async def test_malformed_binary_frames_are_not_forwarded(robot):
+    async with running_app(robot.url) as app:
+        async with operator(app, drive=False) as ws:
+            await wait_until(lambda: app.runtime.link.connected)
+            await robot.send_binary(scan_frame(1)[:-2])  # wrong size
+            await robot.send_binary(b"\x09" + scan_frame(1)[1:])  # wrong type
+            good = scan_frame(3)
+            await robot.send_binary(good)
+            assert await recv_binary(ws) == good  # the first binary frame seen is the valid one
+
+
+async def test_scan_rate_is_at_most_10_hz_and_latest_only(robot):
+    async with running_app(robot.url) as app:
+        async with operator(app, drive=False) as ws:
+            await wait_until(lambda: app.runtime.link.connected)
+            stop = False
+
+            async def flood():
+                n = 0
+                while not stop:
+                    n += 1
+                    await robot.send_binary(scan_frame(n))
+                    await asyncio.sleep(0.005)
+
+            flooder = asyncio.ensure_future(flood())
+            seqs = []
+            started = time.monotonic()
+            try:
+                while time.monotonic() - started < 1.0:
+                    try:
+                        message = await asyncio.wait_for(ws.recv(), 0.3)
+                    except asyncio.TimeoutError:
+                        continue
+                    if isinstance(message, bytes):
+                        seqs.append(struct.unpack_from("<I", message, 2)[0])
+            finally:
+                stop = True
+                await asyncio.gather(flooder, return_exceptions=True)
+            elapsed = time.monotonic() - started
+            assert 5 <= len(seqs) <= 10 * elapsed + 1
+            assert seqs == sorted(set(seqs))  # newest wins, never repeated or reordered
+
+
+async def test_scans_do_not_delay_state_or_commands(robot):
+    async with running_app(robot.url) as app:
+        async with operator(app) as ws:
+            await arm_as_driver(ws, app)
+            for n in range(20):
+                await robot.send_binary(scan_frame(n))
+            await send(ws, t="cmd_vel", seq=11, vx=0.189, vy=0.0, wz=0.0, src="kbd")
+            await wait_until(lambda: any(c["seq"] == 11 for c in robot.cmds()), timeout=1.0)
 
 
 # ---- entry point ----
