@@ -36,3 +36,6 @@ dist/
 # Web build output
 node_modules/
 .next/
+
+# Firmware STM32 của bên ngoài, chỉ để tham khảo, không đưa vào repo
+/stm_goc/
