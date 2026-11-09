@@ -93,6 +93,12 @@ describe("PHY-5 động lực học", () => {
     expect(r.tauPct[0]).toBeCloseTo((100 * 0.18072) / 0.981, 2);
   });
 
+  it("mô-men Mz: wzDot = 2 -> F_d = (-0.81403, -0.81403, +0.81403, +0.81403)", () => {
+    const r = computeDynamics({ ax: 0, ay: 0, wzDot: 2 }, [1, 1, 1, 1]);
+    expect(r.Mz).toBeCloseTo(1.0908, 3);
+    [-0.81403, -0.81403, 0.81403, 0.81403].forEach((e, i) => expect(r.Fd[i]).toBeCloseTo(e, 4));
+  });
+
   it("omega_i = 0 thì lực cản lăn bằng 0", () => {
     const r = computeDynamics({ ax: 1, ay: 0, wzDot: 0 }, [0, 0, 0, 0]);
     expect(r.tau[0]).toBeCloseTo(0.05 * 2.425, 9);
@@ -173,6 +179,8 @@ function simulate(start: Pose, goal: Pose, params: RunParams) {
   let steps = 0;
   let maxSpeed = 0;
   let maxDv = 0;
+  let maxOvershoot = 0;
+  let maxOvershootTheta = 0;
   let prev = { vx: 0, vy: 0, wz: 0 };
   while (status.kind === "running" && steps < 4000) {
     const out = trackStep(s, { pose, dt, stateAgeS: 0.05, armed: true, keyPressed: false });
@@ -182,11 +190,13 @@ function simulate(start: Pose, goal: Pose, params: RunParams) {
     if (status.kind !== "running") break;
     const w = bodyToWorld(out.cmd, pose.theta);
     pose = { x: pose.x + w.xDot * dt, y: pose.y + w.yDot * dt, theta: pose.theta + w.thetaDot * dt };
+    maxOvershoot = Math.max(maxOvershoot, Math.max(0, (pose.x - goal.x) * Math.sign(goal.x - start.x)));
+    maxOvershootTheta = Math.max(maxOvershootTheta, Math.max(0, (pose.theta - goal.theta) * Math.sign(goal.theta - start.theta)));
     maxSpeed = Math.max(maxSpeed, Math.hypot(out.cmd.vx, out.cmd.vy));
     maxDv = Math.max(maxDv, Math.hypot(out.cmd.vx - prev.vx, out.cmd.vy - prev.vy) / dt);
     prev = out.cmd;
   }
-  return { status, pose, steps, maxSpeed, maxDv, state: s };
+  return { status, pose, steps, maxSpeed, maxDv, maxOvershoot, maxOvershootTheta, state: s };
 }
 
 describe("PHY-6 bộ bám đích trên mô hình tích phân", () => {
@@ -216,6 +226,33 @@ describe("PHY-6 bộ bám đích trên mô hình tích phân", () => {
     expect(out.status).toEqual({ kind: "running" });
     expect(out.cmd.vx).toBeCloseTo(out.cmd.vy, 9);
     expect(Math.hypot(out.cmd.vx, out.cmd.vy)).toBeCloseTo(0.5 * 0.05, 9);
+  });
+
+  it("sai số quay về khung thân: theta = pi/2, đích ở +x thế giới -> đi sang phải (vy < 0)", () => {
+    const g: Pose = { x: 1, y: 0, theta: Math.PI / 2 };
+    const s = createTrack({ x: 0, y: 0, theta: Math.PI / 2 }, g, DEFAULT_RUN_PARAMS);
+    const out = trackStep(s, { pose: { x: 0, y: 0, theta: Math.PI / 2 }, dt: 0.05, stateAgeS: 0, armed: true, keyPressed: false });
+    expect(out.cmd.vx).toBeCloseTo(0, 9);
+    expect(out.cmd.vy).toBeCloseTo(-0.025, 9);
+  });
+
+  it("giới hạn phanh: vCruise = 2, accelLin = 0.5, 10 m, vọt đích dưới 0.05 m", () => {
+    const params: RunParams = { vCruise: 2, wzCruise: 1, accelLin: 0.5, accelAng: 1.5 };
+    const goal: Pose = { x: 10, y: 0, theta: 0 };
+    const r = simulate({ x: 0, y: 0, theta: 0 }, goal, params);
+    expect(r.status).toEqual({ kind: "done" });
+    expect(Math.hypot(goal.x - r.pose.x, goal.y - r.pose.y)).toBeLessThan(0.02);
+    expect(r.maxOvershoot).toBeLessThan(0.05);
+    expect(r.state.elapsed).toBeLessThan(r.state.timeoutS);
+  });
+
+  it("giới hạn phanh góc: wzCruise = 6, accelAng = 1.5, quay 3 rad, vọt dưới 0.05 rad", () => {
+    const params: RunParams = { vCruise: 0.2, wzCruise: 6, accelLin: 0.5, accelAng: 1.5 };
+    const goal: Pose = { x: 0, y: 0, theta: 3 };
+    const r = simulate({ x: 0, y: 0, theta: 0 }, goal, params);
+    expect(r.status).toEqual({ kind: "done" });
+    expect(Math.abs(goal.theta - r.pose.theta)).toBeLessThan(0.035);
+    expect(r.maxOvershootTheta).toBeLessThan(0.05);
   });
 
   it("xong cần 3 chu kỳ liên tiếp trong dung sai", () => {
@@ -266,6 +303,13 @@ describe("PHY-6 các điều kiện hủy", () => {
     const out = trackStep({ ...s, elapsed: s.timeoutS - 0.01 }, base);
     expect(out.status).toEqual({ kind: "aborted", reason: "timeout" });
     expect(out.cmd).toEqual({ vx: 0, vy: 0, wz: 0 });
+  });
+
+  it("tư thế không hữu hạn thì hủy, cmd 0 hữu hạn, không làm hỏng trạng thái", () => {
+    const out = trackStep(fresh(), { ...base, pose: { x: NaN, y: 0, theta: 0 } });
+    expect(out.status).toEqual({ kind: "aborted", reason: "stale" });
+    expect(out.cmd).toEqual({ vx: 0, vy: 0, wz: 0 });
+    expect(out.state.prevCmd).toEqual({ vx: 0, vy: 0, wz: 0 });
   });
 
   it("không hủy khi mọi điều kiện ổn", () => {

@@ -2032,6 +2032,141 @@ Trạng thái: `TODO → ORDERED → CODED → PASS → MERGED` hoặc `BLOCKED`
   4. `DynamicsEstimator` lọc đạo hàm vận tốc đo (thông thấp bậc 1, `alpha = dt/(τ+dt)`); mẫu đầu tiên chỉ lưu mốc nên gia tốc bằng 0 cho tới mẫu thứ hai.
   5. `vitest` phải ghim `^4` do xung đột peer với `@types/node@^20` (ghi nhận để T08+ không nâng nhầm).
 
+  **Vòng sửa 1 (từ review của Sonnet, kết quả FAIL)**
+
+  **QUY TẮC ĐẦU TIÊN: Chỉ sửa đúng 2 file `app/client/src/robot/motion.ts` và `app/client/src/robot/mecanum.test.ts`. Mỗi sửa là thay đúng đoạn `CŨ` bằng đoạn `MỚI`; đoạn `CŨ` phải khớp nguyên văn và duy nhất, nếu không khớp thì trả `BLOCKED`. Không chạy git làm đổi repo. Không thêm hằng số tốc độ cố định nào (SAF-04); giới hạn phanh dưới đây dùng gia tốc của lần chạy. Không nhắc tới hệ số cmd_vel của SAF-01 ở bất kỳ đâu.**
+
+  Lý do: (a) tư thế NaN cho `cmd_vel` NaN và làm hỏng `prevCmd` vĩnh viễn; (b) hai số hạng công thức không có test (`SGN·Mz/LEVER` của `F_d`, dấu `eby` của `trackError`); (c) spec PHY-6 mới thêm giới hạn phanh `|v| ≤ √(2·a·|e|)`, `|wz| ≤ √(2·α·|e_θ|)` để không vọt đích khi tốc độ chạy cao (trước đó vCruise 2 m/s, a 0.5 vọt 2 m).
+
+  **Sửa 1. `motion.ts`, hàm `trackStep`: tư thế không hữu hạn thì hủy.**
+  CŨ:
+  ```ts
+    let reason = abortReason(input);
+  ```
+  MỚI:
+  ```ts
+    const poseOk = [input.pose.x, input.pose.y, input.pose.theta].every(Number.isFinite);
+    let reason: AbortReason | null = poseOk ? abortReason(input) : "stale";
+  ```
+
+  **Sửa 2. `motion.ts`, hàm `trackStep`: giới hạn phanh PHY-6.** Giới hạn tốc độ tịnh tiến thành `min(vCruise, √(2·accelLin·dist))`, giữ hướng vector; giới hạn `|wz|` thành `min(wzCruise, √(2·accelAng·|etheta|))`. Gần đích `√(2·a·dist)` lớn hơn nhiều so với `KP·e` nên luật P vẫn quyết định, không kẹt trước dung sai; giới hạn gia tốc và logic 3 chu kỳ giữ nguyên.
+  CŨ:
+  ```ts
+    const speed = Math.hypot(vx, vy);
+    if (speed > p.vCruise) {
+      const k = p.vCruise / speed;
+      vx *= k;
+      vy *= k;
+    }
+    let wz = KP_ANG * error.etheta;
+    if (Math.abs(wz) > p.wzCruise) wz = Math.sign(wz) * p.wzCruise;
+  ```
+  MỚI:
+  ```ts
+    // Giới hạn phanh PHY-6: |v| <= sqrt(2*a*|e|), |wz| <= sqrt(2*alpha*|e_theta|).
+    const speedMax = Math.min(p.vCruise, Math.sqrt(2 * p.accelLin * error.dist));
+    const speed = Math.hypot(vx, vy);
+    if (speed > speedMax) {
+      const k = speedMax / speed;
+      vx *= k;
+      vy *= k;
+    }
+    let wz = KP_ANG * error.etheta;
+    const wzMax = Math.min(
+      p.wzCruise,
+      Math.sqrt(2 * p.accelAng * Math.abs(error.etheta)),
+    );
+    if (Math.abs(wz) > wzMax) wz = Math.sign(wz) * wzMax;
+  ```
+
+  **Sửa 3. `mecanum.test.ts`, hàm `simulate`: đo độ vọt.** Làm 3 thay thế nhỏ.
+  3a. CŨ: `  let maxDv = 0;` (một dòng, trong `simulate`). MỚI:
+  ```ts
+    let maxDv = 0;
+    let maxOvershoot = 0;
+    let maxOvershootTheta = 0;
+  ```
+  3b. CŨ: `    maxSpeed = Math.max(maxSpeed, Math.hypot(out.cmd.vx, out.cmd.vy));` MỚI:
+  ```ts
+      maxOvershoot = Math.max(maxOvershoot, Math.max(0, (pose.x - goal.x) * Math.sign(goal.x - start.x)));
+      maxOvershootTheta = Math.max(maxOvershootTheta, Math.max(0, (pose.theta - goal.theta) * Math.sign(goal.theta - start.theta)));
+      maxSpeed = Math.max(maxSpeed, Math.hypot(out.cmd.vx, out.cmd.vy));
+  ```
+  3c. CŨ: `  return { status, pose, steps, maxSpeed, maxDv, state: s };` MỚI:
+  ```ts
+    return { status, pose, steps, maxSpeed, maxDv, maxOvershoot, maxOvershootTheta, state: s };
+  ```
+
+  **Sửa 4. `mecanum.test.ts`: thêm 5 test mới (29 -> 34).** Mỗi test chèn ngay TRƯỚC test có tên ở cột "Chèn trước".
+
+  | Test mới | Chèn trước test |
+  |---|---|
+  | `mô-men Mz...` | `omega_i = 0 thì lực cản lăn bằng 0` (trong `describe("PHY-5 động lực học")`) |
+  | `sai số quay về khung thân...`, `giới hạn phanh: ...`, `giới hạn phanh góc: ...` (đúng thứ tự này) | `xong cần 3 chu kỳ liên tiếp trong dung sai` (trong `describe("PHY-6 bộ bám đích trên mô hình tích phân")`) |
+  | `tư thế không hữu hạn...` | `không hủy khi mọi điều kiện ổn` (trong `describe("PHY-6 các điều kiện hủy")`) |
+
+  Test chèn trước `omega_i = 0 thì lực cản lăn bằng 0`:
+  ```ts
+    it("mô-men Mz: wzDot = 2 -> F_d = (-0.81403, -0.81403, +0.81403, +0.81403)", () => {
+      const r = computeDynamics({ ax: 0, ay: 0, wzDot: 2 }, [1, 1, 1, 1]);
+      expect(r.Mz).toBeCloseTo(1.0908, 3);
+      [-0.81403, -0.81403, 0.81403, 0.81403].forEach((e, i) => expect(r.Fd[i]).toBeCloseTo(e, 4));
+    });
+
+  ```
+  Ba test chèn trước `xong cần 3 chu kỳ liên tiếp trong dung sai`:
+  ```ts
+    it("sai số quay về khung thân: theta = pi/2, đích ở +x thế giới -> đi sang phải (vy < 0)", () => {
+      const g: Pose = { x: 1, y: 0, theta: Math.PI / 2 };
+      const s = createTrack({ x: 0, y: 0, theta: Math.PI / 2 }, g, DEFAULT_RUN_PARAMS);
+      const out = trackStep(s, { pose: { x: 0, y: 0, theta: Math.PI / 2 }, dt: 0.05, stateAgeS: 0, armed: true, keyPressed: false });
+      expect(out.cmd.vx).toBeCloseTo(0, 9);
+      expect(out.cmd.vy).toBeCloseTo(-0.025, 9);
+    });
+
+    it("giới hạn phanh: vCruise = 2, accelLin = 0.5, 10 m, vọt đích dưới 0.05 m", () => {
+      const params: RunParams = { vCruise: 2, wzCruise: 1, accelLin: 0.5, accelAng: 1.5 };
+      const goal: Pose = { x: 10, y: 0, theta: 0 };
+      const r = simulate({ x: 0, y: 0, theta: 0 }, goal, params);
+      expect(r.status).toEqual({ kind: "done" });
+      expect(Math.hypot(goal.x - r.pose.x, goal.y - r.pose.y)).toBeLessThan(0.02);
+      expect(r.maxOvershoot).toBeLessThan(0.05);
+      expect(r.state.elapsed).toBeLessThan(r.state.timeoutS);
+    });
+
+    it("giới hạn phanh góc: wzCruise = 6, accelAng = 1.5, quay 3 rad, vọt dưới 0.05 rad", () => {
+      const params: RunParams = { vCruise: 0.2, wzCruise: 6, accelLin: 0.5, accelAng: 1.5 };
+      const goal: Pose = { x: 0, y: 0, theta: 3 };
+      const r = simulate({ x: 0, y: 0, theta: 0 }, goal, params);
+      expect(r.status).toEqual({ kind: "done" });
+      expect(Math.abs(goal.theta - r.pose.theta)).toBeLessThan(0.035);
+      expect(r.maxOvershootTheta).toBeLessThan(0.05);
+    });
+
+  ```
+  Test chèn trước `không hủy khi mọi điều kiện ổn`:
+  ```ts
+    it("tư thế không hữu hạn thì hủy, cmd 0 hữu hạn, không làm hỏng trạng thái", () => {
+      const out = trackStep(fresh(), { ...base, pose: { x: NaN, y: 0, theta: 0 } });
+      expect(out.status).toEqual({ kind: "aborted", reason: "stale" });
+      expect(out.cmd).toEqual({ vx: 0, vy: 0, wz: 0 });
+      expect(out.state.prevCmd).toEqual({ vx: 0, vy: 0, wz: 0 });
+    });
+
+  ```
+
+  **Kiểm tra sau sửa** (trong `app/client`, báo kết quả từng lệnh):
+  1. `npm test` — mong đợi `Test Files  1 passed (1)` và `Tests  34 passed (34)`.
+  2. `npx eslint src/robot` — không lỗi, không cảnh báo.
+  3. `npx tsc --noEmit -p . 2>&1 | grep 'src/robot'` — không in dòng nào.
+  4. `grep -rn "1\.89" src; echo "exit=$?"` — chỉ `exit=1`.
+  5. `grep -rnE "from \"(react|next)|document\.|window\." src/robot; echo "exit=$?"` — chỉ `exit=1`.
+  6. `git -C <worktree> status --short` (chỉ đọc) — chỉ `M` cho `package.json`, `package-lock.json`, `spec.md`, `task.md` và `?? app/client/src/robot/` hoặc các file robot đã commit.
+
+  Dry-run của Sonnet trên bản sao ngoài worktree: 34/34 qua; vọt đích mô phỏng (dt = 0.05) là 0.0099 m (vCruise 2, a 0.5, 10 m) và 0.0139 rad (wzCruise 6, 3 rad); bỏ giới hạn phanh làm 2 test mới fail. Test `Mz` và `khung thân` fail khi đổi `* LEVER` hoặc dấu `eby`.
+
+  **Ghi chú cho T11/T12 (không thuộc vòng sửa này):** (1) với dt điều khiển lớn (0.1 s) độ vọt mô phỏng lên ~0.1 m do giới hạn gia tốc rời rạc; T11 giữ 20 Hz. (2) T12 phải bỏ mẫu vận tốc không hữu hạn hoặc gọi `DynamicsEstimator.reset()`: một mẫu NaN làm bộ lọc hỏng cho tới khi reset.
+
 ### T08 — Kết nối, bàn phím toàn cục, khung ứng dụng
 - Trạng thái: TODO · Plan: P3 · Phụ thuộc: T06, T07
 - Spec: FR-01, FR-02, FR-03, FR-08, FR-09, SAF-03, PROTO-1, NFR-03, NFR-05

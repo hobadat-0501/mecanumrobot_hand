@@ -186,7 +186,8 @@ export function trackStep(s: TrackState, input: TrackInput): TrackStep {
   const elapsed = s.elapsed + dt;
   const error = trackError(input.pose, s.goal);
 
-  let reason = abortReason(input);
+  const poseOk = [input.pose.x, input.pose.y, input.pose.theta].every(Number.isFinite);
+  let reason: AbortReason | null = poseOk ? abortReason(input) : "stale";
   if (reason === null && elapsed > s.timeoutS) reason = "timeout";
   if (reason !== null) {
     return {
@@ -212,14 +213,20 @@ export function trackStep(s: TrackState, input: TrackInput): TrackStep {
   // Tốc độ mong muốn; thu nhỏ vector tịnh tiến để giữ hướng.
   let vx = KP_LIN * error.ebx;
   let vy = KP_LIN * error.eby;
+  // Giới hạn phanh PHY-6: |v| <= sqrt(2*a*|e|), |wz| <= sqrt(2*alpha*|e_theta|).
+  const speedMax = Math.min(p.vCruise, Math.sqrt(2 * p.accelLin * error.dist));
   const speed = Math.hypot(vx, vy);
-  if (speed > p.vCruise) {
-    const k = p.vCruise / speed;
+  if (speed > speedMax) {
+    const k = speedMax / speed;
     vx *= k;
     vy *= k;
   }
   let wz = KP_ANG * error.etheta;
-  if (Math.abs(wz) > p.wzCruise) wz = Math.sign(wz) * p.wzCruise;
+  const wzMax = Math.min(
+    p.wzCruise,
+    Math.sqrt(2 * p.accelAng * Math.abs(error.etheta)),
+  );
+  if (Math.abs(wz) > wzMax) wz = Math.sign(wz) * wzMax;
 
   // Giới hạn gia tốc: thu nhỏ vector thay đổi tịnh tiến để giữ hướng; wz giới hạn riêng.
   let dvx = vx - s.prevCmd.vx;
