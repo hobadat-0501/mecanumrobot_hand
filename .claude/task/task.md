@@ -7761,7 +7761,7 @@ Trạng thái: `TODO → ORDERED → CODED → PASS → MERGED` hoặc `BLOCKED`
 - Work order: _(Sonnet điền)_
 
 ### T13 — LiDAR
-- Trạng thái: CODED · Plan: P4 · Phụ thuộc: T09
+- Trạng thái: MERGED · Plan: P4 · Phụ thuộc: T09
 - Spec: FR-10, PROTO-2
 - File: `app/client/src/app/lidar/page.tsx`, `app/client/src/components/robot/charts.tsx`, `app/client/src/robot/{protocol,store,telemetry,telemetry.test}.ts`, `robot/robot_agent/{server,sim,__main__}.py`, `robot/tests/test_robot.py`, `app/server/app_server/{robot_link,main}.py`, `app/server/tests/test_server.py`
 - Đạt khi: vẽ polar 5–10 Hz trên mô phỏng, khung nhị phân đúng PROTO-2, không dồn hàng đợi.

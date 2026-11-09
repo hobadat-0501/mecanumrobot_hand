@@ -57,6 +57,12 @@ mecanum_base/
       │  ├─ store.ts           # WS, state, vòng gửi 20 Hz
       │  ├─ telemetry.ts       # logic thuần: độ trễ, bộ đệm quỹ đạo, phát hiện mất dữ liệu
       │  ├─ telemetry.test.ts
+      │  ├─ forward.ts         # động học thuận: phân tích số nhập, chuỗi tính, chạy theo thời gian
+      │  ├─ forward.test.ts
+      │  ├─ inverse.ts         # động học ngược: đích, tiến độ, bộ chạy tới đích
+      │  ├─ inverse.test.ts
+      │  ├─ dynamics.ts        # nguồn cấp động lực học và bộ đệm lịch sử
+      │  ├─ dynamics.test.ts
       │  ├─ keyboard.tsx       # bàn phím toàn cục (gắn ở root layout)
       │  ├─ mecanum.ts         # công thức PHY-1..PHY-5
       │  ├─ motion.ts          # chạy động học thuận và bộ bám đích PHY-6
