@@ -3274,8 +3274,8 @@ Trạng thái: `TODO → ORDERED → CODED → PASS → MERGED` hoặc `BLOCKED`
   5. Kiểm tra: `/home/vth/ws/mecanum_base/.venv/bin/pytest app/server` phải báo `67 passed`; `/home/vth/ws/mecanum_base/.venv/bin/pytest` phải báo `111 passed`.
 
 ### T06 — Link robot, telemetry, WS operator
-- Trạng thái: CODED · Plan: P2 · Phụ thuộc: T04, T05
-- Spec: FR-08, FR-12, SAF-01, SAF-03, PROTO-1, PROTO-2, PHY-7, NFR-03
+- Trạng thái: MERGED · Plan: P2 · Phụ thuộc: T04, T05
+- Spec: FR-08, FR-12, SAF-01, SAF-02, SAF-03, PROTO-1, PROTO-2, PHY-7, NFR-03
 - File: `app/server/app_server/{main,robot_link,telemetry}.py`, `app/server/tests/test_server.py`
 - Đạt khi: nối được robot mô phỏng, tự kết nối lại; quá 250 ms không có lệnh hoặc operator rớt thì gửi 0; state tới web ≤ 20 Hz và theo đơn vị web; odometry khớp test vector; không payload nào lộ hệ số.
 - Work order:
@@ -4910,6 +4910,7 @@ Trạng thái: `TODO → ORDERED → CODED → PASS → MERGED` hoặc `BLOCKED`
 ### T14 — Kiểm thử toàn tuyến trên mô phỏng
 - Trạng thái: TODO · Plan: P5 · Phụ thuộc: T10, T11, T12, T13
 - Spec: SAF-01, SAF-02, SAF-03, SAF-04, SAF-05, SAF-07, NFR-02, NFR-04, NFR-06
+- Gia cố từ các review trước: bọc thân vòng lặp `broadcast_loop` và `watchdog_loop` trong try/except có log để lỗi một vòng không làm chết vòng lặp; chỉ chuyển tiếp `health`, `charge` sau khi kiểm tra kiểu và giá trị hữu hạn; test `telemetry.clear_robot()` khi mất link; `_authorized` của robot trả 401 thay vì lỗi 500 với header hỏng.
 - Việc: chạy toàn bộ test, lint, build; `app/client/src` không chứa hệ số; bắt payload WS chứng minh web không nhận đơn vị wire; ngắt từng chặng và đo thời gian tự dừng; kiểm tra trên trình duyệt thật.
 - Đạt khi: tất cả qua, kết quả đo ghi vào mục này.
 - Work order: _(Sonnet điền)_
