@@ -34,7 +34,7 @@ Quy ước mã: `FR` chức năng, `SAF` an toàn, `FIX` lỗi code cũ, `PROTO`
 | Mã | Yêu cầu | Task |
 |---|---|---|
 | SAF-01 | Hệ số 1.89: `cmd_vel` chia 1.89 cả ba thành phần, **chỉ tại một hàm** trong `app/server/app_server/control.py`. Telemetry vận tốc `vx, vy, wz` nhân lại 1.89 ở `telemetry.py` (A-1), dùng cùng một hằng số. Hằng số không có trong client, không có trong payload nào tới web, không hiện trên UI. Web luôn thấy đơn vị trước khi chia. | T05, T06, T14 |
-| SAF-02 | Mặc định disarm. App server khởi động ở disarm. Robot có `ROBOT_MOTION_ENABLED` mặc định `false`; khi `false` chỉ ghi vận tốc 0. Arm là trạng thái của app server, kết thúc ở đó, không gửi xuống robot. | T03, T05, T14 |
+| SAF-02 | Mặc định disarm. App server khởi động ở disarm. Robot có `ROBOT_MOTION_ENABLED` mặc định `false`; khi `false` chỉ ghi vận tốc 0. Arm là trạng thái của app server, kết thúc ở đó, không gửi xuống robot. Mất link robot thì tự disarm; không arm được khi link đang mất. | T03, T05, T06, T14 |
 | SAF-03 | Chuỗi tự dừng: (a) web thả phím, mất focus cửa sổ, ẩn tab thì gửi 0 và hủy chạy tự động; (b) app server không nhận lệnh 250 ms, hoặc operator ngắt kết nối, hoặc disarm thì gửi `cmd_vel` 0; (c) robot không nhận lệnh 250 ms hoặc mất link thì tự ghi 0. Lệnh đã hết hạn không được chạy lại khi link phục hồi. | T03, T04, T06, T08, T14 |
 | SAF-04 | Không đặt giới hạn tốc độ phần mềm ở bất kỳ tầng nào (quyết định của người dùng). App server và robot vẫn loại giá trị không hữu hạn; giá trị vượt phạm vi `int16` của khung STM32 bị loại, không kẹp, và gửi 0 thay thế. | T03, T05, T14 |
 | SAF-05 | Writer ép 0 khi telemetry cũ hơn 0.5 s hoặc firmware bật cờ dừng. | T03, T14 |
@@ -61,7 +61,7 @@ Quy ước mã: `FR` chức năng, `SAF` an toàn, `FIX` lỗi code cũ, `PROTO`
 | Mã | Nội dung | Task |
 |---|---|---|
 | PROTO-1 | Web ↔ app server: `ws://100.119.83.63:8000/ws/operator`. Web → server: `hello{token}`, `cmd_vel{seq,vx,vy,wz,src}`, `arm{on}`, `odom_reset`. Server → web (JSON ≤ 20 Hz): `state{link,session,vel,pose,cmd,imu,voltage,flag_stop,charge,health,last_cmd_seq}`; LiDAR qua frame nhị phân theo PROTO-2. Mọi số vận tốc theo đơn vị web. | T05, T06, T08 |
-| PROTO-2 | App server (client) ↔ robot (server): `ws://100.69.39.18:8765/ws`, header `Authorization: Bearer`. Xuống robot chỉ có `cmd_vel{seq,vx,vy,wz}` (đơn vị wire). Lên: `state` JSON ≤ 50 Hz, kèm `t_mono_ns`, `last_cmd_seq`; `scan` nhị phân: header `type u8, ver u8, seq u32, t_mono_ms u64`, thân 360 × `u16` mm little-endian, 0 là không có điểm. Hàng đợi gửi chỉ giữ bản mới nhất. | T04, T06, T13 |
+| PROTO-2 | App server (client) ↔ robot (server): `ws://100.69.39.18:8765/ws`, header `Authorization: Bearer`. Xuống robot chỉ có `cmd_vel{seq,vx,vy,wz}` (đơn vị wire). Lên: `state` JSON ≤ 50 Hz gồm `t_mono_ns` (thời điểm mẫu STM32), `last_cmd_seq`, `vel{vx,vy,wz}`, `imu{ax,ay,az,gx,gy,gz}`, `voltage`, `flag_stop`, `charge{current_a,red,charging,set_state}` hoặc null, `health{stm,lidar,writer}`; `scan` nhị phân: header `type u8, ver u8, seq u32, t_mono_ms u64`, thân 360 × `u16` mm little-endian, 0 là không có điểm. Hàng đợi gửi chỉ giữ bản mới nhất. | T04, T06, T13 |
 
 ## 6. Vật lý
 
