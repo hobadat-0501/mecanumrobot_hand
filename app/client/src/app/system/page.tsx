@@ -102,7 +102,7 @@ export default function SystemPage() {
       <DataLostAlert state={data} />
 
       <div className="grid gap-4 md:grid-cols-3">
-        <Panel title="Liên kết robot" description="Đo giữa app server và robot">
+        <Panel title="Liên kết robot" description="Đo giữa máy điều khiển và robot">
           <ReadoutGrid cols={2}>
             <Readout label="RTT" value={fmt(state?.link.rtt_ms, 1)} unit="ms" dim={dim} />
             <Readout
@@ -123,7 +123,7 @@ export default function SystemPage() {
 
         <Panel
           title="Độ trễ vòng lệnh"
-          description={`cmd_vel gửi đi đến khi last_cmd_seq đạt seq. Mục tiêu p95 ≤ ${LATENCY_P95_TARGET_MS} ms`}
+          description={`Từ lúc gửi lệnh đến lúc robot xác nhận đã nhận. Mục tiêu p95 ≤ ${LATENCY_P95_TARGET_MS} ms`}
         >
           <ReadoutGrid cols={3}>
             <Readout label="Gần nhất" value={fmt(latency?.last, 0)} unit="ms" />
@@ -140,7 +140,7 @@ export default function SystemPage() {
           </p>
         </Panel>
 
-        <Panel title="Dữ liệu trạng thái" description="Từ app server tới trình duyệt">
+        <Panel title="Dữ liệu trạng thái" description="Từ máy điều khiển tới trình duyệt">
           <ReadoutGrid cols={2}>
             <Readout
               label="Từ state cuối"
@@ -167,7 +167,7 @@ export default function SystemPage() {
         <DevicePanel title="Writer (ghi lệnh xuống STM32)" raw={health?.writer} kind="writer" dim={dim} />
       </div>
 
-      <Panel title="Sạc" description="Dữ liệu từ khung phụ của STM32 (giả định A-4, chưa kiểm chứng trên robot thật)">
+      <Panel title="Sạc" description="Thông tin sạc do mạch điều khiển báo về, chưa kiểm chứng trên robot thật">
         {charge ? (
           <ReadoutGrid cols={4}>
             <Readout

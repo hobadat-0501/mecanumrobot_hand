@@ -14,7 +14,6 @@ import {
   goalFromDistanceHeading,
   trackError,
   trackStep,
-  validateRunParams,
   wrapAngle,
 } from "./motion";
 import type { RunParams, TrackError, TrackState } from "./motion";
@@ -41,8 +40,8 @@ export interface InverseFields {
   x: string; // m
   y: string; // m
   theta: string; // độ
-  vCruise: string;
-  wzCruise: string;
+  /** Thời gian mong muốn để tới đích (s). */
+  duration: string;
 }
 
 export const DEFAULT_FIELDS: InverseFields = {
@@ -51,8 +50,7 @@ export const DEFAULT_FIELDS: InverseFields = {
   x: "0.4",
   y: "0.2",
   theta: "30",
-  vCruise: String(DEFAULT_RUN_PARAMS.vCruise),
-  wzCruise: String(DEFAULT_RUN_PARAMS.wzCruise),
+  duration: "5",
 };
 
 export type FieldKey = keyof InverseFields;
@@ -63,8 +61,7 @@ export const FIELD_LABEL: Record<FieldKey, string> = {
   x: "x đích",
   y: "y đích",
   theta: "θ đích",
-  vCruise: "Tốc độ chạy",
-  wzCruise: "Tốc độ quay chạy",
+  duration: "Thời gian",
 };
 
 /** Mục tiêu đã phân tích, đơn vị chuẩn (m, rad). Kiểu A chưa quy đổi vì cần tư thế lúc bấm chạy. */
@@ -74,7 +71,8 @@ export type ParsedTarget =
 
 export interface ParsedInput {
   target: ParsedTarget;
-  params: RunParams;
+  /** Thời gian mong muốn (s); tốc độ chạy suy ra từ quãng đường chia thời gian. */
+  durationS: number;
 }
 
 export type ParseResult =
@@ -120,18 +118,13 @@ export function parseInverseFields(
       goal: { x: num("x"), y: num("y"), theta: degToRad(num("theta")) },
     };
   }
-  const params: RunParams = {
-    vCruise: pos("vCruise"),
-    wzCruise: pos("wzCruise"),
-  };
+  const durationS = pos("duration");
   const keys = Object.keys(errors) as FieldKey[];
   if (keys.length > 0) {
     const message = keys.map((k) => `${FIELD_LABEL[k]} ${errors[k]}`).join("; ");
     return { ok: false, errors, message };
   }
-  const bad = validateRunParams(params);
-  if (bad !== null) return { ok: false, errors: {}, message: bad };
-  return { ok: true, value: { target, params } };
+  return { ok: true, value: { target, durationS } };
 }
 
 /** Tư thế đích: kiểu A quy đổi theo PHY-6 từ tư thế lúc bấm chạy, kiểu B dùng thẳng. */
@@ -139,6 +132,45 @@ export function resolveGoal(target: ParsedTarget, start: Pose): Pose {
   return target.kind === "distance"
     ? goalFromDistanceHeading(start, target.s, target.alpha)
     : { ...target.goal };
+}
+
+/** Kế hoạch chạy suy ra từ đích và thời gian: tốc độ thân, tốc độ bốn bánh, tham số bộ bám đích. */
+export interface InversePlan {
+  params: RunParams;
+  body: BodyVel;
+  wheels: Wheels;
+  /** Quãng đường (m) và góc quay có dấu (rad) tới đích. */
+  distance: number;
+  turn: number;
+}
+
+const EPS = 1e-9;
+
+/**
+ * Tốc độ chạy = quãng đường / thời gian, tốc độ quay = góc / thời gian, hướng theo khung thân.
+ * Kiểu A không cần tư thế hiện tại (start null). Kiểu B cần start, thiếu thì trả null.
+ */
+export function planInverse(target: ParsedTarget, durationS: number, start: Pose | null): InversePlan | null {
+  if (!Number.isFinite(durationS) || durationS <= 0) return null;
+  const origin = start ?? (target.kind === "distance" ? { x: 0, y: 0, theta: 0 } : null);
+  if (origin === null) return null;
+  const e = trackError(origin, resolveGoal(target, origin));
+  const body: BodyVel = {
+    vx: e.dist > EPS ? e.ebx / durationS : 0,
+    vy: e.dist > EPS ? e.eby / durationS : 0,
+    wz: Math.abs(e.etheta) > EPS ? e.etheta / durationS : 0,
+  };
+  if (![body.vx, body.vy, body.wz, e.dist].every(Number.isFinite)) return null;
+  return {
+    params: {
+      vCruise: e.dist > EPS ? e.dist / durationS : DEFAULT_RUN_PARAMS.vCruise,
+      wzCruise: Math.abs(e.etheta) > EPS ? Math.abs(e.etheta) / durationS : DEFAULT_RUN_PARAMS.wzCruise,
+    },
+    body,
+    wheels: inverseKinematics(body),
+    distance: e.dist,
+    turn: e.etheta,
+  };
 }
 
 export interface Progress {

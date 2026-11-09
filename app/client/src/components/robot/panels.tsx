@@ -168,7 +168,7 @@ export function DataLostAlert({ state }: { state: DataState }) {
       <AlertDescription>
         {state === "stale"
           ? "Kết nối còn mở nhưng quá 1 giây không nhận được trạng thái mới. Số liệu bên dưới là giá trị cũ."
-          : "Chưa kết nối tới app server hoặc chưa nhận trạng thái. Số liệu sẽ hiện khi có dữ liệu."}
+          : "Chưa kết nối tới máy điều khiển hoặc chưa nhận trạng thái. Số liệu sẽ hiện khi có dữ liệu."}
       </AlertDescription>
     </Alert>
   );
