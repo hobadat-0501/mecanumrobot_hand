@@ -4281,11 +4281,1882 @@ Trạng thái: `TODO → ORDERED → CODED → PASS → MERGED` hoặc `BLOCKED`
   **Ghi chú cho T11/T12 (không thuộc vòng sửa này):** (1) với dt điều khiển lớn (0.1 s) độ vọt mô phỏng lên ~0.1 m do giới hạn gia tốc rời rạc; T11 giữ 20 Hz. (2) T12 phải bỏ mẫu vận tốc không hữu hạn hoặc gọi `DynamicsEstimator.reset()`: một mẫu NaN làm bộ lọc hỏng cho tới khi reset.
 
 ### T08 — Kết nối, bàn phím toàn cục, khung ứng dụng
-- Trạng thái: TODO · Plan: P3 · Phụ thuộc: T06, T07
+- Trạng thái: ORDERED · Plan: P3 · Phụ thuộc: T06, T07
 - Spec: FR-01, FR-02, FR-03, FR-08, FR-09, SAF-03, PROTO-1, NFR-03, NFR-05
-- File: `app/client/src/app/layout.tsx`, `app/client/src/robot/{protocol,store}.ts`, `app/client/src/robot/keyboard.tsx`, `app/client/src/components/robot/app-shell.tsx`
+- File: `app/client/src/app/layout.tsx`, `app/client/src/robot/{protocol,control,control.test,store}.ts`, `app/client/src/robot/keyboard.tsx`, `app/client/eslint.config.mjs` (miễn trừ cho mã shadcn sẵn có), `app/client/src/components/robot/app-shell.tsx`, trang tạm cho các route trong FR-01 (T09–T13 thay thế)
 - Đạt khi: lái được từ mọi trang trên mô phỏng, nhiều phím cộng vector, gõ trong ô nhập không làm xe chạy, `Esc` luôn dừng, rời tab thì gửi 0, chuyển trang không rớt WS.
-- Work order: _(Sonnet điền; phải dẫn tài liệu Next.js 16 đã đọc)_
+- Work order:
+
+  **QUY TẮC ĐẦU TIÊN: Chỉ chạm các file được liệt kê dưới đây. Nếu thiếu thông tin hoặc có mâu thuẫn, dừng lại và trả `BLOCKED` kèm câu hỏi. Không chạy `git commit` (không chạy lệnh git nào làm đổi repo). Không tự thiết kế: chép đúng nội dung file bên dưới.**
+
+  Thư mục làm việc: worktree `/tmp/claude-1000/-home-vth-ws-mecanum-base/76fe0d3b-44a2-4858-8e13-7f99f2566330/scratchpad/wt/T08` (nhánh `feature/T08-client-shell`). Mọi lệnh npm chạy trong `app/client` của worktree này, không phải `/home/vth/ws/mecanum_base`. `app/client/node_modules` đã cài sẵn; không chạy `npm install`, không thêm thư viện (không cài jsdom).
+
+  **Tài liệu Next.js 16 đã đọc (NFR-05)**, trong `app/client/node_modules/next/dist/docs/` và `app/client/AGENTS.md`:
+  - `app/client/node_modules/next/dist/docs/01-app/01-getting-started/03-layouts-and-pages.md`: root layout bắt buộc có `<html>`, `<body>`; layout giữ state và không render lại khi chuyển trang; `LayoutProps`, `PageProps` là kiểu toàn cục chỉ có sau `next dev`, `next build` hoặc `next typegen`.
+  - `app/client/node_modules/next/dist/docs/01-app/03-api-reference/03-file-conventions/layout.md`: root layout nhận `children`; kiểu tường minh `{ children: React.ReactNode }` là cách hợp lệ; ghi chú "Types are generated during next dev, next build or next typegen".
+  - `app/client/node_modules/next/dist/docs/01-app/03-api-reference/06-cli/next.md` (mục `next typegen`): tsc không thấy `LayoutProps` nếu chưa chạy typegen. Work order này dùng kiểu tường minh nên `tsc` không phụ thuộc file sinh sẵn (xem Quyết định 6).
+  - `app/client/node_modules/next/dist/docs/01-app/01-getting-started/04-linking-and-navigating.md` và `app/client/node_modules/next/dist/docs/01-app/03-api-reference/02-components/link.md`: `next/link` chuyển trang phía client, giữ layout dùng chung, tự prefetch; mục "Checking active links" dùng `usePathname()` trong Client Component.
+  - `app/client/node_modules/next/dist/docs/01-app/03-api-reference/04-functions/use-pathname.md`: `usePathname` chỉ dùng trong Client Component.
+  - `app/client/node_modules/next/dist/docs/01-app/01-getting-started/05-server-and-client-components.md` và `app/client/node_modules/next/dist/docs/01-app/03-api-reference/01-directives/use-client.md`: `"use client"` đặt đầu file, trước import; browser API và hook chỉ ở Client Component; trang và layout mặc định là Server Component.
+  - `app/client/node_modules/next/dist/docs/01-app/03-api-reference/05-config/01-next-config-js/cacheComponents.md` và `app/client/node_modules/next/dist/docs/01-app/02-guides/preserving-ui-state.md`: dự án bật `cacheComponents: true`; trang cũ được giữ ẩn bằng `<Activity>` (effect của trang bị dọn khi ẩn). Vì vậy socket, bộ phân xử và listener bàn phím nằm ở layout gốc và store ngoài React, không nằm trong trang.
+  - `app/client/node_modules/next/dist/docs/01-app/02-guides/environment-variables.md`: biến `NEXT_PUBLIC_*` được nhúng lúc build và chỉ nhúng khi viết nguyên văn `process.env.NEXT_PUBLIC_TÊN` (không qua biến trung gian). `store.ts` làm đúng như vậy.
+
+  File được chạm (và chỉ các file này), đường dẫn tính từ gốc worktree:
+  1. sửa `app/client/eslint.config.mjs` (thay toàn bộ nội dung)
+  2. tạo mới `app/client/src/robot/protocol.ts`
+  3. tạo mới `app/client/src/robot/control.ts`
+  4. tạo mới `app/client/src/robot/store.ts`
+  5. tạo mới `app/client/src/robot/keyboard.tsx`
+  6. tạo mới `app/client/src/robot/control.test.ts`
+  7. tạo mới `app/client/src/components/robot/app-shell.tsx`
+  8. thay toàn bộ `app/client/src/app/layout.tsx`
+  9. thay toàn bộ `app/client/src/app/page.tsx`
+  10. tạo mới `app/client/src/app/kinematics/forward/page.tsx`
+  11. tạo mới `app/client/src/app/kinematics/inverse/page.tsx`
+  12. tạo mới `app/client/src/app/dynamics/page.tsx`
+  13. tạo mới `app/client/src/app/lidar/page.tsx`
+  14. tạo mới `app/client/src/app/system/page.tsx`
+
+  Không sửa `package.json`, `package-lock.json`, `next.config.ts`, `tsconfig.json`, `globals.css`, `mecanum.ts`, `motion.ts`, `mecanum.test.ts`, bất kỳ file trong `src/components/ui/` hay `src/hooks/`. Không tạo `vitest.config.*`. Không tạo thêm file nào khác (ví dụ file bao một hàm).
+
+  **Ràng buộc SAF-01 (tuyệt đối).** Hệ số chia của `cmd_vel` và mọi tên gọi cho nó không được xuất hiện ở bất kỳ file client nào, kể cả chú thích và test. Các file dưới đây đã sạch; không thêm chú thích nhắc tới hệ số đó. Bước 3, mục 5 có lệnh `grep` kiểm tra. **SAF-04:** không thêm giới hạn tốc độ nào; ô tốc độ chỉ từ chối giá trị không hữu hạn hoặc không dương.
+
+  **Quyết định đã chốt (không đổi, để Haiku và các task sau biết lý do):**
+  1. Giao thức khớp T06 (đối chiếu `main.py`, `telemetry.py` trong work order T06): thẻ tin ở khóa `t`; web gửi `hello{t,token}`, `cmd_vel{t,seq,vx,vy,wz,src}`, `arm{t,on}`, `odom_reset{t}`; server gửi `state` với `link.robot`, `link.rtt_ms`, `session.armed`, `session.has_driver`, `session.role`, `vel`, `pose`, `cmd`, `imu`, `voltage`, `flag_stop`, `charge`, `health`, `last_cmd_seq`. Server không trả lời `hello`: quyền lái biết qua `state.session.role`.
+  2. Nguồn lệnh hiện tại (FR-09) tính ở client trong `Arbiter.source`: `keyboard` nếu có phím di chuyển đang giữ, ngược lại nguồn của lần chạy (`forward` hoặc `inverse`), ngược lại `idle`. Server không có trường này.
+  3. Phím thắng chạy tự động (`keyDown` hủy lần chạy, `startRun` bị từ chối khi đang giữ phím). Một timer 20 Hz duy nhất trong `store.ts`, chỉ chạy khi có phím giữ, có lần chạy, hoặc còn nợ một lệnh 0; rảnh thì dừng timer và không gửi gì.
+  4. SAF-03a: `haltAll` (mất focus cửa sổ, ẩn tab, disarm, đóng socket) nhả mọi phím, hủy lần chạy và gửi `cmd_vel` 0 đúng một lần nếu socket còn mở. `emergencyStop` (`X`, `Esc`, nút) gửi 0 rồi `arm{on:false}`. Nhả phím cuối thì gửi đúng một lệnh 0 ngay. Phím di chuyển bị bỏ qua khi chưa `armed` và chưa là `driver`, nên giữ sẵn phím rồi mới arm không làm xe chạy.
+  5. Dấu phím (spec không ghi dấu, theo hệ trục thân x tiến, y trái, wz ngược chiều kim đồng hồ): `W`/`↑` vx+, `S`/`↓` vx-, `A`/`←` vy+ (sang trái), `D`/`→` vy-, `Q` wz+, `E` wz-. Dùng `event.code`, không dùng `event.key`, để đúng khi bật bộ gõ tiếng Việt. `R`, `X` cũng bị bỏ qua khi đang gõ chữ hoặc giữ Ctrl/Meta/Alt (Ctrl+R không được arm). `Esc` luôn dừng.
+  6. Lỗi `tsc` "Cannot find name 'LayoutProps'" đến từ kiểu route sinh sẵn. Sửa theo tài liệu: root layout dùng kiểu tường minh `{ children: React.ReactNode }` (layout.md), nên `npx tsc --noEmit -p .` qua kể cả khi chưa có `.next/types`. Cách thay thế trong tài liệu (`npx next typegen && npx tsc --noEmit -p .`) cũng chạy được nhưng không cần.
+  7. `npx eslint src` hiện đã lỗi từ trước ở hai file shadcn sinh sẵn (`src/components/ui/carousel.tsx`, `src/hooks/use-mobile.ts`, luật `react-hooks/set-state-in-effect`), không phải do T08. Cách sửa: `eslint.config.mjs` tắt đúng luật đó cho `src/components/ui/**` và `src/hooks/**`; không sửa hai file kia. Đây là chỗ T08 chạm một file ngoài danh sách `File:` của task, cần Opus xác nhận.
+  8. Bộ phân xử và logic phím là mã thuần nằm ở `src/robot/control.ts` (không React, DOM, timer, WebSocket) để test không cần jsdom; `store.ts` gắn nó vào socket và timer. `control.ts` và `control.test.ts` không có trong cây thư mục plan.md §3 và dòng `File:` của T08, cần Opus cập nhật.
+  9. Địa chỉ WS: `ws://<window.location.hostname>:8000/ws/operator` (`wss` nếu trang là https), ghi đè bằng `NEXT_PUBLIC_APP_WS_URL`. Mã điều khiển giữ trong `sessionStorage` (khóa `mecanum.operatorCode`), mọi truy cập bọc `try/catch`. Kết nối lại: 0.5 s, gấp đôi, tối đa 5 s, về 0.5 s khi nối được.
+  10. Dữ liệu tần số cao ngoài React state: `useTelemetry()` hoặc `subscribeTelemetry()` + `getTelemetry()` cho state ~20 Hz; `useShell()` chỉ đổi khi kết nối, arm, quyền lái, mã, nguồn lệnh, tốc độ hay kết thúc lần chạy đổi, nên thanh trạng thái không render lại ở 20 Hz.
+
+  **Hợp đồng store cho T09 tới T13 (hàm xuất của `store.ts` và `control.ts`):**
+  - Đọc: `useShell(): ShellSnapshot`, `useTelemetry(): StateMsg | null`, `subscribeTelemetry(listener)`, `getTelemetry()`, `getTelemetryAt()` (`performance.now()` lúc nhận state gần nhất, `-Infinity` nếu chưa có).
+  - Gửi: `setArmed(on)`, `resetOdometry()` (gửi `odom_reset`), `emergencyStop()`, `setOperatorCode(code)`, `setSpeed(lin, ang)`.
+  - Chạy tự động (T10, T11): `startRun(driver: RunDriver, source: "forward" | "inverse"): boolean` (false nếu chưa là driver đã arm hoặc đang giữ phím) và `cancelRun()`. `RunDriver` có một hàm `step(input: RunInput): { cmd: BodyVel; status: RunStatus }` được gọi mỗi 50 ms; `RunInput` gồm `dt`, `pose`, `stateAgeS`, `armed`, `keyPressed` (tương thích `RunContext` của `motion.ts`). Ví dụ T10: giữ `let run = createWheelRun(wheels, seconds)` và `step(input) { const r = wheelRunStep(run, input, input.dt); run = r.run; return { cmd: r.cmd, status: r.status }; }`. `ShellSnapshot.lastRunEnd` cho biết lần chạy xong hay bị hủy và lý do.
+
+  **Bước 1. Tạo thư mục.** Chạy trong `app/client`:
+  `mkdir -p src/components/robot src/app/kinematics/forward src/app/kinematics/inverse src/app/dynamics src/app/lidar src/app/system`
+  (`src/robot/` đã có `mecanum.ts`, `motion.ts`, `mecanum.test.ts`; không đụng ba file đó.)
+
+  **Bước 2. Ghi 14 file.** Các khối code dưới đây thụt vào 2 dấu cách vì nằm trong danh sách Markdown: **bỏ đúng 2 dấu cách đầu mỗi dòng** khi ghi ra file (file bắt đầu ở cột 0; dòng trống để trống). Chép nguyên văn từng ký tự, kể cả dấu tiếng Việt. Code đã được Sonnet chạy thử trên bản sao ngoài repo: `tsc`, `eslint`, 74 test, `npm run build` đều qua, và `store.ts` đã thử thật với app server T06 cộng robot mô phỏng (hello, arm, giữ `W`, nhả phím, mất focus, chạy theo `motion.ts`, phím hủy chạy, dừng khẩn, kết nối lại).
+
+  **File 1: `app/client/eslint.config.mjs`**
+
+  ```js
+  import { defineConfig, globalIgnores } from "eslint/config";
+  import nextVitals from "eslint-config-next/core-web-vitals";
+  import nextTs from "eslint-config-next/typescript";
+
+  const eslintConfig = defineConfig([
+    ...nextVitals,
+    ...nextTs,
+    // Override default ignores of eslint-config-next.
+    globalIgnores([
+      // Default ignores of eslint-config-next:
+      ".next/**",
+      "out/**",
+      "build/**",
+      "next-env.d.ts",
+    ]),
+    // File shadcn sinh sẵn gọi setState trong effect; luật mới của React 19 chặn việc đó.
+    {
+      files: ["src/components/ui/**", "src/hooks/**"],
+      rules: { "react-hooks/set-state-in-effect": "off" },
+    },
+  ]);
+
+  export default eslintConfig;
+  ```
+
+  **File 2: `app/client/src/robot/protocol.ts`**
+
+  ```ts
+  // PROTO-1: kiểu tin nhắn web <-> app server. Mọi vận tốc theo đơn vị web (m/s, rad/s).
+  // Thẻ loại tin nằm ở khóa `t`.
+
+  import type { BodyVel, Pose } from "./mecanum";
+
+  /** Nguồn của một cmd_vel; app server bỏ qua trường này. */
+  export type CmdSrc = "keyboard" | "forward" | "inverse" | "stop";
+
+  export type Role = "driver" | "viewer";
+
+  export type ClientMessage =
+    | { t: "hello"; token: string }
+    | {
+        t: "cmd_vel";
+        seq: number;
+        vx: number;
+        vy: number;
+        wz: number;
+        src: CmdSrc;
+      }
+    | { t: "arm"; on: boolean }
+    | { t: "odom_reset" };
+
+  export interface Imu {
+    ax: number;
+    ay: number;
+    az: number;
+    gx: number;
+    gy: number;
+    gz: number;
+  }
+
+  /** Trường tự do do robot gửi; trang hệ thống (T09) sẽ đọc chi tiết. */
+  export type LooseRecord = { [key: string]: unknown };
+
+  export interface StateMsg {
+    t: "state";
+    link: { robot: boolean; rtt_ms: number | null };
+    session: { armed: boolean; has_driver: boolean; role: Role | null };
+    vel: BodyVel | null;
+    pose: Pose;
+    cmd: BodyVel;
+    imu: Imu | null;
+    voltage: number | null;
+    flag_stop: boolean | number | null;
+    charge: LooseRecord | null;
+    health: LooseRecord | null;
+    last_cmd_seq: number | null;
+  }
+
+  export function encodeMessage(msg: ClientMessage): string {
+    return JSON.stringify(msg);
+  }
+
+  function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+
+  /** Phân tích một tin văn bản từ server. Trả null nếu không phải `state` hợp lệ. */
+  export function parseServerMessage(text: string): StateMsg | null {
+    let data: unknown;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      return null;
+    }
+    if (!isRecord(data) || data.t !== "state") return null;
+    const { link, session, pose, cmd } = data;
+    if (!isRecord(link) || typeof link.robot !== "boolean") return null;
+    if (!isRecord(session) || typeof session.armed !== "boolean") return null;
+    if (!isRecord(pose) || !isRecord(cmd)) return null;
+    return data as unknown as StateMsg;
+  }
+
+  export interface LocationLike {
+    protocol: string;
+    hostname: string;
+  }
+
+  export const WS_PORT = 8000;
+  export const WS_PATH = "/ws/operator";
+
+  /** Địa chỉ WebSocket: biến môi trường nếu có, ngược lại suy từ hostname của trang, cổng 8000. */
+  export function resolveWsUrl(
+    envUrl: string | undefined,
+    loc: LocationLike,
+  ): string {
+    if (envUrl !== undefined && envUrl.trim() !== "") return envUrl.trim();
+    const scheme = loc.protocol === "https:" ? "wss" : "ws";
+    return `${scheme}://${loc.hostname}:${WS_PORT}${WS_PATH}`;
+  }
+  ```
+
+  **File 3: `app/client/src/robot/control.ts`**
+
+  ```ts
+  // Logic thuần của điều khiển (FR-02, FR-09, SAF-03a): ánh xạ phím, chặn khi gõ chữ,
+  // và bộ phân xử nguồn lệnh. Không dùng React, DOM, timer hay WebSocket nên test được trực tiếp.
+  // store.ts gắn bộ phân xử vào timer 20 Hz và socket.
+
+  import type { BodyVel, Pose } from "./mecanum";
+  import { CONTROL_HZ } from "./motion";
+  import type { AbortReason, RunContext, RunStatus } from "./motion";
+  import type { CmdSrc } from "./protocol";
+
+  export const TICK_MS = 1000 / CONTROL_HZ; // 50 ms
+
+  /** Tốc độ bàn phím: lin (m/s) cho vx, vy; ang (rad/s) cho wz. Không chặn trên (SAF-04). */
+  export interface Speed {
+    lin: number;
+    ang: number;
+  }
+
+  export const DEFAULT_SPEED: Speed = { lin: 0.2, ang: 1.0 };
+
+  /** Số hữu hạn lớn hơn 0 thì trả về số đó, ngược lại null. Không có chặn trên. */
+  export function parseSpeed(text: string): number | null {
+    if (text.trim() === "") return null;
+    const value = Number(text);
+    return Number.isFinite(value) && value > 0 ? value : null;
+  }
+
+  export type MotionAction = "fwd" | "back" | "left" | "right" | "ccw" | "cw";
+
+  // event.code, không phải event.key: đúng khi bật bộ gõ tiếng Việt hay đổi bố cục bàn phím.
+  // Hệ trục thân: x tiến, y trái, wz dương ngược chiều kim đồng hồ.
+  const MOTION_CODES: Readonly<Record<string, MotionAction>> = {
+    KeyW: "fwd",
+    ArrowUp: "fwd",
+    KeyS: "back",
+    ArrowDown: "back",
+    KeyA: "left",
+    ArrowLeft: "left",
+    KeyD: "right",
+    ArrowRight: "right",
+    KeyQ: "ccw",
+    KeyE: "cw",
+  };
+
+  export function motionActionOf(code: string): MotionAction | null {
+    return Object.prototype.hasOwnProperty.call(MOTION_CODES, code)
+      ? MOTION_CODES[code]
+      : null;
+  }
+
+  /** Tập phím đang giữ (theo event.code) thành vector. Hai phím cùng hướng không cộng đôi. */
+  export function keysToVector(held: ReadonlySet<string>, speed: Speed): BodyVel {
+    const on = new Set<MotionAction>();
+    for (const code of held) {
+      const action = motionActionOf(code);
+      if (action !== null) on.add(action);
+    }
+    const axis = (plus: MotionAction, minus: MotionAction): number =>
+      (on.has(plus) ? 1 : 0) - (on.has(minus) ? 1 : 0);
+    return {
+      vx: axis("fwd", "back") * speed.lin,
+      vy: axis("left", "right") * speed.lin,
+      wz: axis("ccw", "cw") * speed.ang,
+    };
+  }
+
+  /** Phần tử có focus mà gõ chữ vào được. Cấu trúc tối giản để test không cần DOM. */
+  export interface FocusLike {
+    tagName?: string;
+    isContentEditable?: boolean;
+  }
+
+  export function isTypingTarget(target: FocusLike | null | undefined): boolean {
+    if (target === null || target === undefined) return false;
+    if (target.isContentEditable === true) return true;
+    const tag = typeof target.tagName === "string" ? target.tagName.toUpperCase() : "";
+    return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+  }
+
+  export type KeyAction =
+    | { kind: "motion"; code: string }
+    | { kind: "arm" }
+    | { kind: "stop" };
+
+  export interface KeyContext {
+    /** Focus đang ở ô nhập. */
+    typing: boolean;
+    /** Ctrl, Meta hoặc Alt đang giữ (Ctrl+R tải lại trang không được arm). */
+    modifier: boolean;
+  }
+
+  /** FR-02: phím nhấn xuống thành hành động, hoặc null nếu bị bỏ qua. Esc luôn có hiệu lực. */
+  export function decideKeyDown(code: string, ctx: KeyContext): KeyAction | null {
+    if (code === "Escape") return { kind: "stop" };
+    if (ctx.typing || ctx.modifier) return null;
+    if (code === "KeyX") return { kind: "stop" };
+    if (code === "KeyR") return { kind: "arm" };
+    if (motionActionOf(code) !== null) return { kind: "motion", code };
+    return null;
+  }
+
+  export type RunSource = "forward" | "inverse";
+  /** FR-09: nguồn lệnh hiện tại, tính ở client. */
+  export type Source = "idle" | "keyboard" | RunSource;
+
+  export type EndReason =
+    | AbortReason
+    | "blur"
+    | "hidden"
+    | "closed"
+    | "stop"
+    | "cancel"
+    | "error";
+
+  export interface RunEnd {
+    source: RunSource;
+    done: boolean;
+    /** null khi done. */
+    reason: EndReason | null;
+  }
+
+  /** Đầu vào mỗi chu kỳ cho bộ chạy tự động; tương thích RunContext của motion.ts. */
+  export interface RunInput extends RunContext {
+    /** Thời gian từ chu kỳ trước (s). */
+    dt: number;
+    /** Tư thế mới nhất từ server, null nếu chưa có state. */
+    pose: Pose | null;
+  }
+
+  export interface RunStep {
+    cmd: BodyVel;
+    status: RunStatus;
+  }
+
+  /** T10, T11 bọc bộ bước của motion.ts (wheelRunStep, trackStep) thành RunDriver. */
+  export interface RunDriver {
+    step(input: RunInput): RunStep;
+  }
+
+  export interface TickContext {
+    dt: number;
+    pose: Pose | null;
+    stateAgeS: number;
+    armed: boolean;
+  }
+
+  export interface Output {
+    cmd: BodyVel;
+    src: CmdSrc;
+  }
+
+  const ZERO: BodyVel = { vx: 0, vy: 0, wz: 0 };
+
+  function isZero(cmd: BodyVel): boolean {
+    return cmd.vx === 0 && cmd.vy === 0 && cmd.wz === 0;
+  }
+
+  /**
+   * Phân xử nguồn lệnh: phím thắng chạy tự động. Chỉ có bộ phân xử này tạo ra cmd_vel.
+   * Khi rảnh (không phím, không chạy, không nợ lệnh 0) thì tick trả null: không gửi gì.
+   */
+  export class Arbiter {
+    speed: Speed;
+    private held = new Set<string>();
+    private run: { driver: RunDriver; source: RunSource } | null = null;
+    private owesZero = false;
+    private lastSrc: CmdSrc = "keyboard";
+    private end: RunEnd | null = null;
+
+    constructor(speed: Speed = DEFAULT_SPEED) {
+      this.speed = speed;
+    }
+
+    get source(): Source {
+      if (this.held.size > 0) return "keyboard";
+      if (this.run !== null) return this.run.source;
+      return "idle";
+    }
+
+    /** Còn việc phải làm ở chu kỳ tới, nên timer 20 Hz cần chạy. */
+    get active(): boolean {
+      return this.held.size > 0 || this.run !== null || this.owesZero;
+    }
+
+    /** Kết thúc của lần chạy gần nhất, null nếu chưa có. */
+    get lastRunEnd(): RunEnd | null {
+      return this.end;
+    }
+
+    get holdingKeys(): boolean {
+      return this.held.size > 0;
+    }
+
+    setSpeed(speed: Speed): void {
+      this.speed = speed;
+    }
+
+    /** Giữ một phím di chuyển. Mọi phím di chuyển hủy lần chạy đang có. */
+    keyDown(code: string): void {
+      if (motionActionOf(code) === null) return;
+      this.held.add(code);
+      this.cancelRun("key");
+    }
+
+    keyUp(code: string): void {
+      this.held.delete(code);
+    }
+
+    /** Bắt đầu một lần chạy. Trả false (không chạy) khi đang giữ phím: phím thắng. */
+    startRun(driver: RunDriver, source: RunSource): boolean {
+      if (this.held.size > 0) return false;
+      this.cancelRun("cancel");
+      this.run = { driver, source };
+      this.end = null;
+      return true;
+    }
+
+    cancelRun(reason: EndReason): void {
+      if (this.run === null) return;
+      this.end = { source: this.run.source, done: false, reason };
+      this.run = null;
+    }
+
+    /** Nhả mọi phím và hủy lần chạy (mất focus, ẩn tab, disarm, đóng socket, dừng khẩn). */
+    releaseAll(reason: EndReason): void {
+      this.held.clear();
+      this.cancelRun(reason);
+      this.owesZero = false;
+    }
+
+    /** Nhả mọi phím nhưng giữ lần chạy (focus vào ô nhập). */
+    releaseKeys(): void {
+      this.held.clear();
+    }
+
+    /** Lệnh 0 còn nợ sau khi nhả phím hoặc hủy chạy. Trả null nếu không nợ hoặc vẫn còn nguồn. */
+    flushZero(): Output | null {
+      if (!this.owesZero || this.held.size > 0 || this.run !== null) return null;
+      this.owesZero = false;
+      return { cmd: { ...ZERO }, src: this.lastSrc };
+    }
+
+    /** Một chu kỳ 20 Hz. null nghĩa là không gửi gì. */
+    tick(ctx: TickContext): Output | null {
+      if (this.held.size > 0) {
+        return this.emit({ cmd: keysToVector(this.held, this.speed), src: "keyboard" });
+      }
+      if (this.run !== null) {
+        const { driver, source } = this.run;
+        let step: RunStep;
+        try {
+          step = driver.step({ ...ctx, keyPressed: false });
+        } catch {
+          this.end = { source, done: false, reason: "error" };
+          this.run = null;
+          return this.emit({ cmd: { ...ZERO }, src: source });
+        }
+        if (step.status.kind === "running") {
+          return this.emit({ cmd: step.cmd, src: source });
+        }
+        this.end =
+          step.status.kind === "done"
+            ? { source, done: true, reason: null }
+            : { source, done: false, reason: step.status.reason };
+        this.run = null;
+        return this.emit({ cmd: { ...ZERO }, src: source });
+      }
+      return this.flushZero();
+    }
+
+    private emit(out: Output): Output {
+      this.owesZero = !isZero(out.cmd);
+      this.lastSrc = out.src;
+      return out;
+    }
+  }
+  ```
+
+  **File 4: `app/client/src/robot/store.ts`**
+
+  ```ts
+  // Kho trạng thái robot cho cả ứng dụng: một WebSocket ngoài React, tự kết nối lại có back-off,
+  // một bộ phân xử nguồn lệnh với một timer 20 Hz (FR-02, FR-03, FR-08, FR-09, SAF-03a, NFR-03).
+  // Dữ liệu tần số cao (state ~20 Hz) không nằm trong React state: trang đọc bằng
+  // useTelemetry() hoặc subscribeTelemetry() + getTelemetry() (canvas qua ref).
+  // Trạng thái tần số thấp cho thanh trạng thái nằm trong useShell().
+
+  import { useSyncExternalStore } from "react";
+
+  import { Arbiter, DEFAULT_SPEED, TICK_MS } from "./control";
+  import type {
+    EndReason,
+    Output,
+    RunDriver,
+    RunEnd,
+    RunSource,
+    Source,
+    Speed,
+  } from "./control";
+  import { encodeMessage, parseServerMessage, resolveWsUrl } from "./protocol";
+  import type { ClientMessage, Role, StateMsg } from "./protocol";
+
+  export const BACKOFF_INITIAL_MS = 500;
+  export const BACKOFF_MAX_MS = 5000;
+  const MAX_BUFFERED_BYTES = 8192;
+  const CODE_KEY = "mecanum.operatorCode";
+
+  /** Thời gian chờ kết nối lại lần tới: gấp đôi, tối đa BACKOFF_MAX_MS. */
+  export function nextBackoff(previousMs: number): number {
+    return Math.min(previousMs * 2, BACKOFF_MAX_MS);
+  }
+
+  export type Connection = "connecting" | "open" | "closed";
+
+  /** Trạng thái tần số thấp: chỉ đổi khi một trường đổi, nên thanh trạng thái không render lại ở 20 Hz. */
+  export interface ShellSnapshot {
+    conn: Connection;
+    /** Đã nhận ít nhất một state trên kết nối hiện tại. */
+    hasState: boolean;
+    robotLink: boolean;
+    armed: boolean;
+    role: Role | null;
+    hasCode: boolean;
+    source: Source;
+    speed: Speed;
+    lastRunEnd: RunEnd | null;
+  }
+
+  const INITIAL_SHELL: ShellSnapshot = {
+    conn: "closed",
+    hasState: false,
+    robotLink: false,
+    armed: false,
+    role: null,
+    hasCode: false,
+    source: "idle",
+    speed: DEFAULT_SPEED,
+    lastRunEnd: null,
+  };
+
+  const arbiter = new Arbiter(DEFAULT_SPEED);
+
+  let started = false;
+  let ws: WebSocket | null = null;
+  let conn: Connection = "closed";
+  let backoffMs = BACKOFF_INITIAL_MS;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let tickTimer: ReturnType<typeof setInterval> | null = null;
+  let lastTickAt = 0;
+  let seq = 0;
+  let operatorCode = "";
+  let telemetry: StateMsg | null = null;
+  let telemetryAt = Number.NEGATIVE_INFINITY;
+  let shell: ShellSnapshot = INITIAL_SHELL;
+  const telemetryListeners = new Set<() => void>();
+  const shellListeners = new Set<() => void>();
+
+  // ---- tồn tại ngoài React: đăng ký và đọc ----
+
+  export function subscribeTelemetry(listener: () => void): () => void {
+    telemetryListeners.add(listener);
+    return () => {
+      telemetryListeners.delete(listener);
+    };
+  }
+
+  export function getTelemetry(): StateMsg | null {
+    return telemetry;
+  }
+
+  /** performance.now() lúc nhận state gần nhất; -Infinity nếu chưa có. */
+  export function getTelemetryAt(): number {
+    return telemetryAt;
+  }
+
+  function subscribeShell(listener: () => void): () => void {
+    shellListeners.add(listener);
+    return () => {
+      shellListeners.delete(listener);
+    };
+  }
+
+  function getShell(): ShellSnapshot {
+    return shell;
+  }
+
+  function getServerShell(): ShellSnapshot {
+    return INITIAL_SHELL;
+  }
+
+  function getServerTelemetry(): StateMsg | null {
+    return null;
+  }
+
+  /** State mới nhất ở tần số tới 20 Hz; chỉ trang cần số liệu mới nên dùng. */
+  export function useTelemetry(): StateMsg | null {
+    return useSyncExternalStore(subscribeTelemetry, getTelemetry, getServerTelemetry);
+  }
+
+  /** Trạng thái tần số thấp cho thanh trạng thái và trang cần biết arm, quyền lái, nguồn lệnh. */
+  export function useShell(): ShellSnapshot {
+    return useSyncExternalStore(subscribeShell, getShell, getServerShell);
+  }
+
+  function notifyTelemetry(): void {
+    for (const listener of telemetryListeners) listener();
+  }
+
+  function publishShell(): void {
+    const next: ShellSnapshot = {
+      conn,
+      hasState: telemetry !== null,
+      robotLink: telemetry?.link.robot ?? false,
+      armed: telemetry?.session.armed ?? false,
+      role: telemetry?.session.role ?? null,
+      hasCode: operatorCode !== "",
+      source: arbiter.source,
+      speed: arbiter.speed,
+      lastRunEnd: arbiter.lastRunEnd,
+    };
+    const same =
+      next.conn === shell.conn &&
+      next.hasState === shell.hasState &&
+      next.robotLink === shell.robotLink &&
+      next.armed === shell.armed &&
+      next.role === shell.role &&
+      next.hasCode === shell.hasCode &&
+      next.source === shell.source &&
+      next.speed === shell.speed &&
+      next.lastRunEnd === shell.lastRunEnd;
+    if (same) return;
+    shell = next;
+    for (const listener of shellListeners) listener();
+  }
+
+  // ---- gửi ----
+
+  function isOpen(): boolean {
+    return ws !== null && ws.readyState === WebSocket.OPEN;
+  }
+
+  function send(msg: ClientMessage): void {
+    if (ws !== null && ws.readyState === WebSocket.OPEN) ws.send(encodeMessage(msg));
+  }
+
+  function sendCmd(out: Output): void {
+    if (ws === null || ws.readyState !== WebSocket.OPEN) return;
+    const zero = out.cmd.vx === 0 && out.cmd.vy === 0 && out.cmd.wz === 0;
+    // NFR-03: socket đang nghẽn thì bỏ lệnh chuyển động này, không dồn hàng đợi; lệnh 0 vẫn đi.
+    if (!zero && ws.bufferedAmount > MAX_BUFFERED_BYTES) return;
+    seq += 1;
+    send({
+      t: "cmd_vel",
+      seq,
+      vx: out.cmd.vx,
+      vy: out.cmd.vy,
+      wz: out.cmd.wz,
+      src: out.src,
+    });
+  }
+
+  function sendZeroNow(): void {
+    sendCmd({ cmd: { vx: 0, vy: 0, wz: 0 }, src: "stop" });
+  }
+
+  function sendHello(): void {
+    if (operatorCode !== "") send({ t: "hello", token: operatorCode });
+  }
+
+  // ---- điều khiển ----
+
+  /** Quyền lái thật: socket mở, đã arm, và client này đang giữ quyền lái. */
+  function canDrive(): boolean {
+    return (
+      isOpen() &&
+      telemetry !== null &&
+      telemetry.session.armed &&
+      telemetry.session.role === "driver"
+    );
+  }
+
+  function syncTimer(): void {
+    if (arbiter.active) {
+      if (tickTimer === null) {
+        lastTickAt = performance.now() - TICK_MS;
+        tickTimer = setInterval(onTick, TICK_MS);
+      }
+    } else if (tickTimer !== null) {
+      clearInterval(tickTimer);
+      tickTimer = null;
+    }
+  }
+
+  function onTick(): void {
+    if (!canDrive()) {
+      haltAll("disarmed");
+      return;
+    }
+    const now = performance.now();
+    const dt = Math.max(0, (now - lastTickAt) / 1000);
+    lastTickAt = now;
+    const out = arbiter.tick({
+      dt,
+      pose: telemetry?.pose ?? null,
+      stateAgeS: (now - telemetryAt) / 1000,
+      armed: true,
+    });
+    if (out !== null) sendCmd(out);
+    syncTimer();
+    publishShell();
+  }
+
+  function flushZero(): void {
+    const out = arbiter.flushZero();
+    if (out !== null) sendCmd(out);
+  }
+
+  /**
+   * SAF-03a: hủy phím và lần chạy, gửi cmd_vel 0 đúng một lần (nếu socket còn mở).
+   * Dùng khi mất focus, ẩn tab, disarm, đóng socket.
+   */
+  export function haltAll(reason: EndReason): void {
+    arbiter.releaseAll(reason);
+    sendZeroNow();
+    syncTimer();
+    publishShell();
+  }
+
+  /** Dừng khẩn (X, Esc, nút): 0 rồi disarm. */
+  export function emergencyStop(): void {
+    arbiter.releaseAll("stop");
+    sendZeroNow();
+    send({ t: "arm", on: false });
+    syncTimer();
+    publishShell();
+  }
+
+  export function setArmed(on: boolean): void {
+    send({ t: "arm", on });
+  }
+
+  export function resetOdometry(): void {
+    send({ t: "odom_reset" });
+  }
+
+  /** Phím di chuyển nhấn xuống. Bỏ qua khi chưa được phép lái. */
+  export function pressMotion(code: string): void {
+    if (!canDrive()) return;
+    arbiter.keyDown(code);
+    syncTimer();
+    publishShell();
+  }
+
+  export function releaseMotion(code: string): void {
+    arbiter.keyUp(code);
+    flushZero();
+    syncTimer();
+    publishShell();
+  }
+
+  /** Focus vào ô nhập: nhả mọi phím đang giữ, giữ nguyên lần chạy. */
+  export function releaseKeys(): void {
+    arbiter.releaseKeys();
+    flushZero();
+    syncTimer();
+    publishShell();
+  }
+
+  /** T10, T11: bắt đầu một lần chạy theo bộ bước của motion.ts. Trả false nếu không được phép. */
+  export function startRun(driver: RunDriver, source: RunSource): boolean {
+    if (!canDrive()) return false;
+    if (!arbiter.startRun(driver, source)) return false;
+    syncTimer();
+    publishShell();
+    return true;
+  }
+
+  /** T10, T11: hủy lần chạy, gửi 0 một lần nếu còn nợ. */
+  export function cancelRun(): void {
+    arbiter.cancelRun("cancel");
+    flushZero();
+    syncTimer();
+    publishShell();
+  }
+
+  /** Đặt tốc độ bàn phím. Giá trị không hữu hạn hoặc không dương bị bỏ qua; không có chặn trên. */
+  export function setSpeed(lin: number, ang: number): void {
+    if (!(Number.isFinite(lin) && lin > 0 && Number.isFinite(ang) && ang > 0)) return;
+    arbiter.setSpeed({ lin, ang });
+    publishShell();
+  }
+
+  // ---- mã điều khiển ----
+
+  function readStoredCode(): string {
+    try {
+      return window.sessionStorage.getItem(CODE_KEY) ?? "";
+    } catch {
+      return "";
+    }
+  }
+
+  function writeStoredCode(code: string): void {
+    try {
+      if (code === "") window.sessionStorage.removeItem(CODE_KEY);
+      else window.sessionStorage.setItem(CODE_KEY, code);
+    } catch {
+      // sessionStorage bị chặn: mã chỉ sống trong bộ nhớ.
+    }
+  }
+
+  /** Đặt mã điều khiển. Rỗng thì xóa mã và kết nối lại ở chế độ chỉ xem. */
+  export function setOperatorCode(code: string): void {
+    operatorCode = code.trim();
+    writeStoredCode(operatorCode);
+    if (operatorCode !== "") sendHello();
+    else if (ws !== null) ws.close();
+    publishShell();
+  }
+
+  // ---- kết nối ----
+
+  function scheduleReconnect(): void {
+    if (reconnectTimer !== null) return;
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      connect();
+    }, backoffMs);
+    backoffMs = nextBackoff(backoffMs);
+  }
+
+  function connect(): void {
+    conn = "connecting";
+    publishShell();
+    let socket: WebSocket;
+    try {
+      socket = new WebSocket(
+        resolveWsUrl(process.env.NEXT_PUBLIC_APP_WS_URL, window.location),
+      );
+    } catch {
+      conn = "closed";
+      publishShell();
+      scheduleReconnect();
+      return;
+    }
+    socket.binaryType = "arraybuffer";
+    ws = socket;
+    socket.onopen = () => {
+      if (ws !== socket) return;
+      conn = "open";
+      backoffMs = BACKOFF_INITIAL_MS;
+      sendHello();
+      publishShell();
+    };
+    socket.onmessage = (event: MessageEvent) => {
+      if (ws !== socket || typeof event.data !== "string") return; // khung nhị phân: LiDAR, T13
+      const msg = parseServerMessage(event.data);
+      if (msg === null) return;
+      const couldDrive = canDrive();
+      telemetry = msg;
+      telemetryAt = performance.now();
+      notifyTelemetry();
+      if (couldDrive && !canDrive()) haltAll("disarmed");
+      else publishShell();
+    };
+    socket.onclose = () => {
+      if (ws !== socket) return;
+      ws = null;
+      conn = "closed";
+      telemetry = null;
+      notifyTelemetry();
+      haltAll("closed");
+      scheduleReconnect();
+    };
+    socket.onerror = () => {
+      // onclose theo sau; không làm gì thêm.
+    };
+  }
+
+  /** Khởi động kết nối một lần (gọi từ effect; gọi lại không làm gì). Không bao giờ đóng khi đổi trang. */
+  export function startStore(): void {
+    if (started || typeof window === "undefined") return;
+    started = true;
+    operatorCode = readStoredCode();
+    connect();
+  }
+  ```
+
+  **File 5: `app/client/src/robot/keyboard.tsx`**
+
+  ```tsx
+  "use client";
+
+  // FR-02: điều khiển bàn phím toàn cục, gắn ở root layout nên hoạt động ở mọi trang.
+  // Không render gì; chỉ đăng ký listener và chuyển sự kiện cho store.
+
+  import { useEffect } from "react";
+
+  import { decideKeyDown, isTypingTarget, motionActionOf } from "./control";
+  import type { FocusLike } from "./control";
+  import {
+    emergencyStop,
+    haltAll,
+    pressMotion,
+    releaseKeys,
+    releaseMotion,
+    setArmed,
+    startStore,
+  } from "./store";
+
+  export function KeyboardController(): null {
+    useEffect(() => {
+      startStore();
+
+      const onKeyDown = (event: KeyboardEvent) => {
+        const action = decideKeyDown(event.code, {
+          typing: isTypingTarget(event.target as FocusLike | null),
+          modifier: event.ctrlKey || event.metaKey || event.altKey,
+        });
+        if (action === null) return;
+        if (action.kind === "motion") {
+          event.preventDefault(); // không cuộn trang bằng phím mũi tên
+          pressMotion(action.code);
+        } else if (action.kind === "arm") {
+          if (!event.repeat) setArmed(true);
+        } else {
+          emergencyStop();
+        }
+      };
+      // Nhả phím luôn được xử lý, kể cả khi focus đã chuyển vào ô nhập, để không kẹt phím.
+      const onKeyUp = (event: KeyboardEvent) => {
+        if (motionActionOf(event.code) !== null) releaseMotion(event.code);
+      };
+      const onFocusIn = (event: FocusEvent) => {
+        if (isTypingTarget(event.target as FocusLike | null)) releaseKeys();
+      };
+      const onBlur = () => haltAll("blur");
+      const onVisibility = () => {
+        if (document.hidden) haltAll("hidden");
+      };
+
+      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("keyup", onKeyUp);
+      window.addEventListener("focusin", onFocusIn);
+      window.addEventListener("blur", onBlur);
+      document.addEventListener("visibilitychange", onVisibility);
+      return () => {
+        window.removeEventListener("keydown", onKeyDown);
+        window.removeEventListener("keyup", onKeyUp);
+        window.removeEventListener("focusin", onFocusIn);
+        window.removeEventListener("blur", onBlur);
+        document.removeEventListener("visibilitychange", onVisibility);
+      };
+    }, []);
+
+    return null;
+  }
+  ```
+
+  **File 6: `app/client/src/robot/control.test.ts`**
+
+  ```ts
+  import { describe, expect, it } from "vitest";
+
+  import {
+    Arbiter,
+    DEFAULT_SPEED,
+    decideKeyDown,
+    isTypingTarget,
+    keysToVector,
+    motionActionOf,
+    parseSpeed,
+  } from "./control";
+  import type { RunDriver, TickContext } from "./control";
+  import { createWheelRun, wheelRunStep } from "./motion";
+  import type { Wheels } from "./mecanum";
+  import { parseServerMessage, resolveWsUrl } from "./protocol";
+  import { BACKOFF_INITIAL_MS, BACKOFF_MAX_MS, nextBackoff } from "./store";
+
+  const SPEED = { lin: 0.2, ang: 1.0 };
+  const CTX: TickContext = { dt: 0.05, pose: null, stateAgeS: 0.01, armed: true };
+  const NO_MODIFIER = { typing: false, modifier: false };
+
+  function keys(...codes: string[]): Set<string> {
+    return new Set(codes);
+  }
+
+  function wheelDriver(wheels: Wheels, durationS: number): RunDriver {
+    let run = createWheelRun(wheels, durationS);
+    return {
+      step(input) {
+        const result = wheelRunStep(run, input, input.dt);
+        run = result.run;
+        return { cmd: result.cmd, status: result.status };
+      },
+    };
+  }
+
+  describe("keysToVector (FR-02)", () => {
+    it("không phím thì vector 0", () => {
+      expect(keysToVector(keys(), SPEED)).toEqual({ vx: 0, vy: 0, wz: 0 });
+    });
+
+    it("W và mũi tên lên là vx dương, S và mũi tên xuống là vx âm", () => {
+      expect(keysToVector(keys("KeyW"), SPEED)).toEqual({ vx: 0.2, vy: 0, wz: 0 });
+      expect(keysToVector(keys("ArrowUp"), SPEED)).toEqual({ vx: 0.2, vy: 0, wz: 0 });
+      expect(keysToVector(keys("KeyS"), SPEED)).toEqual({ vx: -0.2, vy: 0, wz: 0 });
+      expect(keysToVector(keys("ArrowDown"), SPEED)).toEqual({ vx: -0.2, vy: 0, wz: 0 });
+    });
+
+    it("A và mũi tên trái là vy dương (sang trái), D và mũi tên phải là vy âm", () => {
+      expect(keysToVector(keys("KeyA"), SPEED)).toEqual({ vx: 0, vy: 0.2, wz: 0 });
+      expect(keysToVector(keys("ArrowLeft"), SPEED)).toEqual({ vx: 0, vy: 0.2, wz: 0 });
+      expect(keysToVector(keys("KeyD"), SPEED)).toEqual({ vx: 0, vy: -0.2, wz: 0 });
+      expect(keysToVector(keys("ArrowRight"), SPEED)).toEqual({ vx: 0, vy: -0.2, wz: 0 });
+    });
+
+    it("Q quay ngược chiều kim đồng hồ (wz dương), E quay thuận chiều kim đồng hồ", () => {
+      expect(keysToVector(keys("KeyQ"), SPEED)).toEqual({ vx: 0, vy: 0, wz: 1 });
+      expect(keysToVector(keys("KeyE"), SPEED)).toEqual({ vx: 0, vy: 0, wz: -1 });
+    });
+
+    it("nhiều phím cộng thành vector (đi chéo vừa quay)", () => {
+      expect(keysToVector(keys("KeyW", "KeyA", "KeyE"), SPEED)).toEqual({
+        vx: 0.2,
+        vy: 0.2,
+        wz: -1,
+      });
+    });
+
+    it("hai phím ngược nhau triệt tiêu", () => {
+      expect(keysToVector(keys("KeyW", "KeyS"), SPEED)).toEqual({ vx: 0, vy: 0, wz: 0 });
+    });
+
+    it("hai phím cùng hướng không cộng đôi", () => {
+      expect(keysToVector(keys("KeyW", "ArrowUp"), SPEED)).toEqual({ vx: 0.2, vy: 0, wz: 0 });
+    });
+
+    it("tốc độ không có chặn trên (SAF-04)", () => {
+      expect(keysToVector(keys("KeyW", "KeyQ"), { lin: 1000, ang: 50 })).toEqual({
+        vx: 1000,
+        vy: 0,
+        wz: 50,
+      });
+    });
+
+    it("bỏ qua mã không phải phím di chuyển", () => {
+      expect(keysToVector(keys("KeyX", "Space"), SPEED)).toEqual({ vx: 0, vy: 0, wz: 0 });
+      expect(motionActionOf("KeyX")).toBeNull();
+      expect(motionActionOf("constructor")).toBeNull();
+      expect(motionActionOf("KeyW")).toBe("fwd");
+    });
+  });
+
+  describe("parseSpeed", () => {
+    it("nhận số hữu hạn lớn hơn 0, không chặn trên", () => {
+      expect(parseSpeed("0.3")).toBe(0.3);
+      expect(parseSpeed(" 2 ")).toBe(2);
+      expect(parseSpeed("1000")).toBe(1000);
+    });
+
+    it("từ chối rỗng, 0, âm, không phải số, vô hạn", () => {
+      for (const text of ["", "  ", "0", "-1", "abc", "Infinity", "NaN", "1e999"]) {
+        expect(parseSpeed(text)).toBeNull();
+      }
+    });
+  });
+
+  describe("isTypingTarget", () => {
+    it("true với input, textarea, select, contenteditable", () => {
+      expect(isTypingTarget({ tagName: "INPUT" })).toBe(true);
+      expect(isTypingTarget({ tagName: "textarea" })).toBe(true);
+      expect(isTypingTarget({ tagName: "SELECT" })).toBe(true);
+      expect(isTypingTarget({ tagName: "DIV", isContentEditable: true })).toBe(true);
+    });
+
+    it("false với phần tử khác hoặc không có target", () => {
+      expect(isTypingTarget({ tagName: "BUTTON" })).toBe(false);
+      expect(isTypingTarget({ tagName: "BODY" })).toBe(false);
+      expect(isTypingTarget({})).toBe(false);
+      expect(isTypingTarget(null)).toBe(false);
+      expect(isTypingTarget(undefined)).toBe(false);
+    });
+  });
+
+  describe("decideKeyDown (FR-02)", () => {
+    it("phím di chuyển, R, X, Esc khi không gõ chữ", () => {
+      expect(decideKeyDown("KeyW", NO_MODIFIER)).toEqual({ kind: "motion", code: "KeyW" });
+      expect(decideKeyDown("ArrowLeft", NO_MODIFIER)).toEqual({
+        kind: "motion",
+        code: "ArrowLeft",
+      });
+      expect(decideKeyDown("KeyR", NO_MODIFIER)).toEqual({ kind: "arm" });
+      expect(decideKeyDown("KeyX", NO_MODIFIER)).toEqual({ kind: "stop" });
+      expect(decideKeyDown("Escape", NO_MODIFIER)).toEqual({ kind: "stop" });
+    });
+
+    it("đang gõ chữ thì bỏ qua phím di chuyển, R và X nhưng Esc vẫn dừng", () => {
+      const typing = { typing: true, modifier: false };
+      expect(decideKeyDown("KeyW", typing)).toBeNull();
+      expect(decideKeyDown("ArrowUp", typing)).toBeNull();
+      expect(decideKeyDown("KeyR", typing)).toBeNull();
+      expect(decideKeyDown("KeyX", typing)).toBeNull();
+      expect(decideKeyDown("Escape", typing)).toEqual({ kind: "stop" });
+    });
+
+    it("giữ Ctrl, Meta hoặc Alt thì bỏ qua (Ctrl+R không được arm), Esc vẫn dừng", () => {
+      const modifier = { typing: false, modifier: true };
+      expect(decideKeyDown("KeyR", modifier)).toBeNull();
+      expect(decideKeyDown("KeyW", modifier)).toBeNull();
+      expect(decideKeyDown("Escape", modifier)).toEqual({ kind: "stop" });
+    });
+
+    it("phím khác bị bỏ qua", () => {
+      expect(decideKeyDown("KeyZ", NO_MODIFIER)).toBeNull();
+      expect(decideKeyDown("Space", NO_MODIFIER)).toBeNull();
+    });
+  });
+
+  describe("Arbiter: bàn phím", () => {
+    it("rảnh thì tick không gửi gì và timer không cần chạy", () => {
+      const arb = new Arbiter(SPEED);
+      expect(arb.source).toBe("idle");
+      expect(arb.active).toBe(false);
+      expect(arb.tick(CTX)).toBeNull();
+      expect(arb.flushZero()).toBeNull();
+    });
+
+    it("giữ phím thì mỗi tick gửi vector, nhả phím thì nợ đúng một lệnh 0", () => {
+      const arb = new Arbiter(SPEED);
+      arb.keyDown("KeyW");
+      expect(arb.source).toBe("keyboard");
+      expect(arb.active).toBe(true);
+      expect(arb.tick(CTX)).toEqual({ cmd: { vx: 0.2, vy: 0, wz: 0 }, src: "keyboard" });
+      expect(arb.tick(CTX)).toEqual({ cmd: { vx: 0.2, vy: 0, wz: 0 }, src: "keyboard" });
+      arb.keyUp("KeyW");
+      expect(arb.source).toBe("idle");
+      expect(arb.active).toBe(true);
+      expect(arb.flushZero()).toEqual({ cmd: { vx: 0, vy: 0, wz: 0 }, src: "keyboard" });
+      expect(arb.flushZero()).toBeNull();
+      expect(arb.tick(CTX)).toBeNull();
+      expect(arb.active).toBe(false);
+    });
+
+    it("nhả phím trước khi tick nào gửi vector thì không nợ lệnh 0", () => {
+      const arb = new Arbiter(SPEED);
+      arb.keyDown("KeyD");
+      arb.keyUp("KeyD");
+      expect(arb.flushZero()).toBeNull();
+      expect(arb.active).toBe(false);
+    });
+
+    it("nhả một trong hai phím thì vector còn lại", () => {
+      const arb = new Arbiter(SPEED);
+      arb.keyDown("KeyW");
+      arb.keyDown("KeyQ");
+      expect(arb.tick(CTX)?.cmd).toEqual({ vx: 0.2, vy: 0, wz: 1 });
+      arb.keyUp("KeyQ");
+      expect(arb.tick(CTX)?.cmd).toEqual({ vx: 0.2, vy: 0, wz: 0 });
+    });
+
+    it("đổi tốc độ có hiệu lực ngay ở tick sau", () => {
+      const arb = new Arbiter(SPEED);
+      arb.keyDown("KeyW");
+      arb.setSpeed({ lin: 3, ang: 2 });
+      expect(arb.tick(CTX)?.cmd).toEqual({ vx: 3, vy: 0, wz: 0 });
+    });
+
+    it("phím không phải di chuyển bị bỏ qua", () => {
+      const arb = new Arbiter(SPEED);
+      arb.keyDown("KeyX");
+      expect(arb.source).toBe("idle");
+      expect(arb.active).toBe(false);
+    });
+
+    it("releaseAll nhả mọi phím và không nợ lệnh 0 (store tự gửi 0 một lần)", () => {
+      const arb = new Arbiter(SPEED);
+      arb.keyDown("KeyW");
+      arb.tick(CTX);
+      arb.releaseAll("blur");
+      expect(arb.source).toBe("idle");
+      expect(arb.active).toBe(false);
+      expect(arb.tick(CTX)).toBeNull();
+    });
+
+    it("releaseKeys nhả phím nhưng vẫn nợ lệnh 0 đã gửi vector", () => {
+      const arb = new Arbiter(SPEED);
+      arb.keyDown("KeyW");
+      arb.tick(CTX);
+      arb.releaseKeys();
+      expect(arb.flushZero()).toEqual({ cmd: { vx: 0, vy: 0, wz: 0 }, src: "keyboard" });
+    });
+
+    it("DEFAULT_SPEED là 0.2 m/s và 1.0 rad/s", () => {
+      expect(DEFAULT_SPEED).toEqual({ lin: 0.2, ang: 1.0 });
+    });
+  });
+
+  describe("Arbiter: chạy tự động và phân xử (FR-09)", () => {
+    const FORWARD: Wheels = [10, 10, 10, 10]; // vx = 0.5 m/s
+
+    it("chạy theo bộ bước của motion.ts rồi tự kết thúc bằng một lệnh 0", () => {
+      const arb = new Arbiter(SPEED);
+      expect(arb.startRun(wheelDriver(FORWARD, 0.1), "forward")).toBe(true);
+      expect(arb.source).toBe("forward");
+      expect(arb.active).toBe(true);
+
+      const first = arb.tick(CTX);
+      expect(first?.src).toBe("forward");
+      expect(first?.cmd.vx).toBeCloseTo(0.5, 12);
+      expect(first?.cmd.vy).toBeCloseTo(0, 12);
+      expect(first?.cmd.wz).toBeCloseTo(0, 12);
+
+      const last = arb.tick(CTX);
+      expect(last).toEqual({ cmd: { vx: 0, vy: 0, wz: 0 }, src: "forward" });
+      expect(arb.lastRunEnd).toEqual({ source: "forward", done: true, reason: null });
+      expect(arb.source).toBe("idle");
+      expect(arb.active).toBe(false);
+      expect(arb.tick(CTX)).toBeNull();
+    });
+
+    it("phím di chuyển hủy lần chạy và phím thắng", () => {
+      const arb = new Arbiter(SPEED);
+      arb.startRun(wheelDriver(FORWARD, 5), "inverse");
+      expect(arb.source).toBe("inverse");
+      arb.keyDown("KeyD");
+      expect(arb.source).toBe("keyboard");
+      expect(arb.lastRunEnd).toEqual({ source: "inverse", done: false, reason: "key" });
+      expect(arb.tick(CTX)).toEqual({ cmd: { vx: 0, vy: -0.2, wz: 0 }, src: "keyboard" });
+    });
+
+    it("đang giữ phím thì không bắt đầu được lần chạy", () => {
+      const arb = new Arbiter(SPEED);
+      arb.keyDown("KeyW");
+      expect(arb.startRun(wheelDriver(FORWARD, 5), "forward")).toBe(false);
+      expect(arb.source).toBe("keyboard");
+    });
+
+    it("bắt đầu lần chạy mới thay lần cũ", () => {
+      const arb = new Arbiter(SPEED);
+      arb.startRun(wheelDriver(FORWARD, 5), "forward");
+      arb.startRun(wheelDriver(FORWARD, 5), "inverse");
+      expect(arb.source).toBe("inverse");
+      expect(arb.lastRunEnd).toBeNull();
+    });
+
+    it("hủy lần chạy đang gửi lệnh khác 0 thì nợ đúng một lệnh 0", () => {
+      const arb = new Arbiter(SPEED);
+      arb.startRun(wheelDriver(FORWARD, 5), "forward");
+      arb.tick(CTX);
+      arb.cancelRun("cancel");
+      expect(arb.lastRunEnd).toEqual({ source: "forward", done: false, reason: "cancel" });
+      expect(arb.flushZero()).toEqual({ cmd: { vx: 0, vy: 0, wz: 0 }, src: "forward" });
+      expect(arb.flushZero()).toBeNull();
+      expect(arb.active).toBe(false);
+    });
+
+    it("disarm giữa chừng: motion.ts hủy với lý do disarmed và gửi 0", () => {
+      const arb = new Arbiter(SPEED);
+      arb.startRun(wheelDriver(FORWARD, 5), "forward");
+      arb.tick(CTX);
+      const out = arb.tick({ ...CTX, armed: false });
+      expect(out).toEqual({ cmd: { vx: 0, vy: 0, wz: 0 }, src: "forward" });
+      expect(arb.lastRunEnd).toEqual({ source: "forward", done: false, reason: "disarmed" });
+      expect(arb.active).toBe(false);
+    });
+
+    it("state cũ hơn 0.5 s: motion.ts hủy với lý do stale", () => {
+      const arb = new Arbiter(SPEED);
+      arb.startRun(wheelDriver(FORWARD, 5), "forward");
+      const out = arb.tick({ ...CTX, stateAgeS: 0.6 });
+      expect(out?.cmd).toEqual({ vx: 0, vy: 0, wz: 0 });
+      expect(arb.lastRunEnd).toEqual({ source: "forward", done: false, reason: "stale" });
+    });
+
+    it("mất focus, ẩn tab, đóng socket: releaseAll hủy lần chạy, tick không gửi gì", () => {
+      const arb = new Arbiter(SPEED);
+      arb.startRun(wheelDriver(FORWARD, 5), "forward");
+      arb.tick(CTX);
+      arb.releaseAll("hidden");
+      expect(arb.lastRunEnd).toEqual({ source: "forward", done: false, reason: "hidden" });
+      expect(arb.source).toBe("idle");
+      expect(arb.tick(CTX)).toBeNull();
+    });
+
+    it("bộ chạy ném lỗi thì kết thúc với lý do error và gửi 0", () => {
+      const arb = new Arbiter(SPEED);
+      const broken: RunDriver = {
+        step() {
+          throw new RangeError("hỏng");
+        },
+      };
+      arb.startRun(broken, "inverse");
+      expect(arb.tick(CTX)).toEqual({ cmd: { vx: 0, vy: 0, wz: 0 }, src: "inverse" });
+      expect(arb.lastRunEnd).toEqual({ source: "inverse", done: false, reason: "error" });
+      expect(arb.tick(CTX)).toBeNull();
+    });
+  });
+
+  describe("protocol", () => {
+    const STATE = {
+      t: "state",
+      link: { robot: true, rtt_ms: 3.2 },
+      session: { armed: false, has_driver: true, role: "driver" },
+      vel: null,
+      pose: { x: 0, y: 0, theta: 0 },
+      cmd: { vx: 0, vy: 0, wz: 0 },
+      imu: null,
+      voltage: null,
+      flag_stop: null,
+      charge: null,
+      health: null,
+      last_cmd_seq: null,
+    };
+
+    it("nhận state hợp lệ", () => {
+      const msg = parseServerMessage(JSON.stringify(STATE));
+      expect(msg?.t).toBe("state");
+      expect(msg?.session.role).toBe("driver");
+    });
+
+    it("từ chối JSON hỏng, tin khác loại và state thiếu trường", () => {
+      expect(parseServerMessage("{")).toBeNull();
+      expect(parseServerMessage("[]")).toBeNull();
+      expect(parseServerMessage("null")).toBeNull();
+      expect(parseServerMessage(JSON.stringify({ t: "pong" }))).toBeNull();
+      expect(parseServerMessage(JSON.stringify({ ...STATE, link: null }))).toBeNull();
+      expect(
+        parseServerMessage(JSON.stringify({ ...STATE, session: { armed: "yes" } })),
+      ).toBeNull();
+      expect(parseServerMessage(JSON.stringify({ ...STATE, pose: 1 }))).toBeNull();
+    });
+
+    it("địa chỉ WebSocket suy từ hostname, cổng 8000, đường dẫn /ws/operator", () => {
+      expect(resolveWsUrl(undefined, { protocol: "http:", hostname: "100.119.83.63" })).toBe(
+        "ws://100.119.83.63:8000/ws/operator",
+      );
+      expect(resolveWsUrl("", { protocol: "http:", hostname: "localhost" })).toBe(
+        "ws://localhost:8000/ws/operator",
+      );
+      expect(resolveWsUrl(undefined, { protocol: "https:", hostname: "robot.example" })).toBe(
+        "wss://robot.example:8000/ws/operator",
+      );
+    });
+
+    it("biến môi trường ghi đè địa chỉ", () => {
+      expect(
+        resolveWsUrl(" ws://10.0.0.5:9000/ws/operator ", {
+          protocol: "http:",
+          hostname: "localhost",
+        }),
+      ).toBe("ws://10.0.0.5:9000/ws/operator");
+    });
+  });
+
+  describe("back-off kết nối lại", () => {
+    it("gấp đôi tới mức tối đa", () => {
+      const seen: number[] = [];
+      let delay = BACKOFF_INITIAL_MS;
+      for (let i = 0; i < 6; i++) {
+        seen.push(delay);
+        delay = nextBackoff(delay);
+      }
+      expect(seen).toEqual([500, 1000, 2000, 4000, 5000, 5000]);
+      expect(BACKOFF_MAX_MS).toBe(5000);
+    });
+  });
+  ```
+
+  **File 7: `app/client/src/components/robot/app-shell.tsx`**
+
+  ```tsx
+  "use client";
+
+  // FR-01, FR-09: khung ứng dụng nằm ở root layout nên tồn tại xuyên suốt khi chuyển trang.
+  // Gồm điều hướng (next/link, chuyển trang phía client không làm rớt WebSocket),
+  // thanh trạng thái toàn cục (kết nối, arm, dừng khẩn, nguồn lệnh) và ô nhập mã điều khiển.
+
+  import {
+    Activity,
+    Cpu,
+    KeyRound,
+    LayoutDashboard,
+    Move,
+    OctagonX,
+    Power,
+    Radar,
+    Waypoints,
+    Wifi,
+    WifiOff,
+  } from "lucide-react";
+  import Link from "next/link";
+  import { usePathname } from "next/navigation";
+  import { useEffect, useId, useState } from "react";
+  import type { ComponentType, FormEvent, ReactNode } from "react";
+
+  import { Button } from "@/components/ui/button";
+  import { Input } from "@/components/ui/input";
+  import { Kbd, KbdGroup } from "@/components/ui/kbd";
+  import { Label } from "@/components/ui/label";
+  import { cn } from "@/lib/utils";
+  import { parseSpeed } from "@/robot/control";
+  import type { Source } from "@/robot/control";
+  import {
+    emergencyStop,
+    setArmed,
+    setOperatorCode,
+    setSpeed,
+    startStore,
+    useShell,
+  } from "@/robot/store";
+  import type { ShellSnapshot } from "@/robot/store";
+
+  interface NavItem {
+    href: string;
+    label: string;
+    short: string;
+    Icon: ComponentType<{ className?: string }>;
+  }
+
+  const NAV: readonly NavItem[] = [
+    { href: "/", label: "Tổng quan", short: "Tổng quan", Icon: LayoutDashboard },
+    { href: "/kinematics/forward", label: "Động học thuận", short: "Thuận", Icon: Move },
+    { href: "/kinematics/inverse", label: "Động học ngược", short: "Ngược", Icon: Waypoints },
+    { href: "/dynamics", label: "Động lực học", short: "Lực", Icon: Activity },
+    { href: "/lidar", label: "LiDAR", short: "LiDAR", Icon: Radar },
+    { href: "/system", label: "Hệ thống", short: "Hệ thống", Icon: Cpu },
+  ];
+
+  const SOURCE_LABEL: Record<Source, string> = {
+    idle: "Không có",
+    keyboard: "Bàn phím",
+    forward: "Chạy động học thuận",
+    inverse: "Chạy động học ngược",
+  };
+
+  type Tone = "ok" | "warn" | "bad" | "idle";
+
+  const TONE_CLASS: Record<Tone, string> = {
+    ok: "text-emerald-700 dark:text-emerald-400",
+    warn: "text-amber-700 dark:text-amber-400",
+    bad: "text-destructive",
+    idle: "text-muted-foreground",
+  };
+
+  function Chip({ tone, children }: { tone: Tone; children: ReactNode }) {
+    return (
+      <span
+        className={cn(
+          "inline-flex items-center gap-1.5 rounded-md border bg-card px-2 py-1 text-xs font-medium tracking-wide whitespace-nowrap",
+          TONE_CLASS[tone],
+        )}
+      >
+        {children}
+      </span>
+    );
+  }
+
+  function connectionChip(s: ShellSnapshot): { tone: Tone; text: string } {
+    if (s.conn === "open") {
+      return s.hasState
+        ? { tone: "ok", text: "Đã kết nối" }
+        : { tone: "warn", text: "Chờ dữ liệu" };
+    }
+    if (s.conn === "connecting") return { tone: "warn", text: "Đang kết nối" };
+    return { tone: "bad", text: "Mất kết nối" };
+  }
+
+  function StatusBar({ shell }: { shell: ShellSnapshot }) {
+    const connection = connectionChip(shell);
+    const driver = shell.role === "driver";
+    const canToggleArm =
+      shell.conn === "open" && driver && (shell.armed || shell.robotLink);
+    return (
+      <header className="sticky top-0 z-30 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2 md:px-6">
+          <div className="flex w-full gap-2 sm:order-last sm:ml-auto sm:w-auto">
+            <Button
+              type="button"
+              variant={shell.armed ? "secondary" : "outline"}
+              size="lg"
+              className="flex-1 sm:flex-none"
+              disabled={!canToggleArm}
+              onClick={() => setArmed(!shell.armed)}
+            >
+              <Power data-icon="inline-start" />
+              {shell.armed ? "Disarm" : "Arm (R)"}
+            </Button>
+            <Button
+              type="button"
+              size="lg"
+              className="flex-1 bg-destructive text-white hover:bg-destructive/90 sm:flex-none"
+              onClick={() => emergencyStop()}
+            >
+              <OctagonX data-icon="inline-start" />
+              DỪNG KHẨN (X / Esc)
+            </Button>
+          </div>
+          <div
+            className="flex flex-wrap items-center gap-2"
+            role="status"
+            aria-label="Trạng thái hệ thống"
+          >
+            <Chip tone={connection.tone}>
+              {shell.conn === "open" ? (
+                <Wifi className="size-3.5" />
+              ) : (
+                <WifiOff className="size-3.5" />
+              )}
+              {connection.text}
+            </Chip>
+            <Chip tone={!shell.hasState ? "idle" : shell.robotLink ? "ok" : "bad"}>
+              Robot: {!shell.hasState ? "—" : shell.robotLink ? "đã nối" : "mất link"}
+            </Chip>
+            <Chip tone={driver ? "ok" : "idle"}>
+              <KeyRound className="size-3.5" />
+              {driver ? "Quyền lái" : "Chỉ xem"}
+            </Chip>
+            <Chip tone={shell.armed ? "warn" : "idle"}>
+              {shell.armed ? "ĐÃ ARM" : "DISARM"}
+            </Chip>
+            <Chip tone={shell.source === "idle" ? "idle" : "ok"}>
+              Nguồn lệnh: {SOURCE_LABEL[shell.source]}
+            </Chip>
+          </div>
+        </div>
+      </header>
+    );
+  }
+
+  function ControlSettings({ shell }: { shell: ShellSnapshot }) {
+    const linId = useId();
+    const angId = useId();
+    const codeId = useId();
+    const [linText, setLinText] = useState(String(shell.speed.lin));
+    const [angText, setAngText] = useState(String(shell.speed.ang));
+    const [codeText, setCodeText] = useState("");
+    const linValid = parseSpeed(linText) !== null;
+    const angValid = parseSpeed(angText) !== null;
+
+    function onLin(text: string) {
+      setLinText(text);
+      const lin = parseSpeed(text);
+      if (lin !== null) setSpeed(lin, shell.speed.ang);
+    }
+
+    function onAng(text: string) {
+      setAngText(text);
+      const ang = parseSpeed(text);
+      if (ang !== null) setSpeed(shell.speed.lin, ang);
+    }
+
+    function onSubmitCode(event: FormEvent<HTMLFormElement>) {
+      event.preventDefault();
+      if (codeText.trim() === "") return;
+      setOperatorCode(codeText);
+      setCodeText("");
+    }
+
+    const rejected = shell.hasCode && shell.hasState && shell.role !== "driver";
+
+    return (
+      <section
+        aria-label="Cài đặt điều khiển"
+        className="flex flex-wrap items-end gap-x-6 gap-y-3 border-b bg-muted/40 px-3 py-3 md:px-6"
+      >
+        <div className="flex gap-3">
+          <div className="grid w-32 gap-1.5">
+            <Label htmlFor={linId}>Tịnh tiến (m/s)</Label>
+            <Input
+              id={linId}
+              inputMode="decimal"
+              autoComplete="off"
+              value={linText}
+              aria-invalid={!linValid}
+              className="tabular-nums"
+              onChange={(e) => onLin(e.target.value)}
+            />
+          </div>
+          <div className="grid w-32 gap-1.5">
+            <Label htmlFor={angId}>Quay (rad/s)</Label>
+            <Input
+              id={angId}
+              inputMode="decimal"
+              autoComplete="off"
+              value={angText}
+              aria-invalid={!angValid}
+              className="tabular-nums"
+              onChange={(e) => onAng(e.target.value)}
+            />
+          </div>
+        </div>
+
+        {shell.hasCode ? (
+          <div className="grid gap-1.5">
+            <span className="text-sm font-medium">Mã điều khiển</span>
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-muted-foreground">
+                Đã lưu cho phiên này
+              </span>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setOperatorCode("")}
+              >
+                Xóa mã
+              </Button>
+            </div>
+            {rejected ? (
+              <span className="text-xs text-destructive">
+                Mã chưa được chấp nhận hoặc đã có người khác đang lái.
+              </span>
+            ) : null}
+          </div>
+        ) : (
+          <form onSubmit={onSubmitCode} className="grid gap-1.5">
+            <Label htmlFor={codeId}>Mã điều khiển</Label>
+            <div className="flex gap-2">
+              <Input
+                id={codeId}
+                type="password"
+                autoComplete="off"
+                placeholder="Nhập mã để lái"
+                value={codeText}
+                className="w-44"
+                onChange={(e) => setCodeText(e.target.value)}
+              />
+              <Button type="submit" variant="secondary">
+                Xác nhận
+              </Button>
+            </div>
+          </form>
+        )}
+
+        <div className="hidden flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground md:flex">
+          <span className="flex items-center gap-1.5">
+            <KbdGroup>
+              <Kbd>W</Kbd>
+              <Kbd>A</Kbd>
+              <Kbd>S</Kbd>
+              <Kbd>D</Kbd>
+            </KbdGroup>
+            tiến, trái, lùi, phải
+          </span>
+          <span className="flex items-center gap-1.5">
+            <KbdGroup>
+              <Kbd>Q</Kbd>
+              <Kbd>E</Kbd>
+            </KbdGroup>
+            quay trái, phải
+          </span>
+          <span className="flex items-center gap-1.5">
+            <Kbd>R</Kbd>
+            arm
+          </span>
+          <span className="flex items-center gap-1.5">
+            <KbdGroup>
+              <Kbd>X</Kbd>
+              <Kbd>Esc</Kbd>
+            </KbdGroup>
+            dừng và disarm
+          </span>
+        </div>
+      </section>
+    );
+  }
+
+  function Navigation() {
+    const pathname = usePathname();
+    return (
+      <aside className="contents md:sticky md:top-0 md:flex md:h-svh md:w-56 md:shrink-0 md:flex-col md:border-r md:bg-sidebar md:text-sidebar-foreground">
+        <div className="hidden border-b px-4 py-4 md:block">
+          <div className="flex items-center gap-2">
+            <span className="grid size-6 place-items-center rounded-sm bg-sidebar-primary text-xs font-bold text-sidebar-primary-foreground">
+              M
+            </span>
+            <span className="text-sm font-semibold tracking-[0.18em]">MECANUM</span>
+          </div>
+          <p className="mt-1 text-xs text-muted-foreground">Bảng điều khiển robot</p>
+        </div>
+        <nav
+          aria-label="Điều hướng"
+          className="fixed inset-x-0 bottom-0 z-40 grid grid-cols-6 border-t bg-sidebar text-sidebar-foreground md:static md:z-auto md:flex md:flex-col md:gap-1 md:border-t-0 md:p-3"
+        >
+          {NAV.map(({ href, label, short, Icon }) => {
+            const active = pathname === href;
+            return (
+              <Link
+                key={href}
+                href={href}
+                aria-current={active ? "page" : undefined}
+                className={cn(
+                  "flex flex-col items-center justify-center gap-0.5 px-1 py-2 text-[11px] leading-tight outline-none focus-visible:ring-3 focus-visible:ring-ring/50 md:flex-row md:justify-start md:gap-3 md:rounded-lg md:px-3 md:text-sm",
+                  active
+                    ? "font-medium text-sidebar-primary md:bg-sidebar-accent md:text-sidebar-accent-foreground"
+                    : "text-muted-foreground hover:text-foreground md:hover:bg-sidebar-accent/60",
+                )}
+              >
+                <Icon className="size-5 md:size-4" />
+                <span className="md:hidden">{short}</span>
+                <span className="hidden md:inline">{label}</span>
+              </Link>
+            );
+          })}
+        </nav>
+      </aside>
+    );
+  }
+
+  export function AppShell({ children }: { children: ReactNode }) {
+    const shell = useShell();
+
+    useEffect(() => {
+      startStore();
+    }, []);
+
+    return (
+      <div className="flex min-h-svh flex-col md:flex-row">
+        <Navigation />
+        <div className="flex min-w-0 flex-1 flex-col pb-16 md:pb-0">
+          <StatusBar shell={shell} />
+          <ControlSettings shell={shell} />
+          <main className="flex-1 px-3 py-4 md:px-6 md:py-6">{children}</main>
+        </div>
+      </div>
+    );
+  }
+  ```
+
+  **File 8: `app/client/src/app/layout.tsx`**
+
+  ```tsx
+  import "@/styles/globals.css";
+
+  import type { Metadata } from "next";
+  import { Roboto } from "next/font/google";
+
+  import { AppShell } from "@/components/robot/app-shell";
+  import { TooltipProvider } from "@/components/ui/tooltip";
+  import { cn } from "@/lib/utils";
+  import { KeyboardController } from "@/robot/keyboard";
+
+  const roboto = Roboto({ subsets: ["latin", "vietnamese"], variable: "--font-sans" });
+
+  export const metadata: Metadata = {
+    title: "Mecanum - Bảng điều khiển",
+    description: "Điều khiển và giám sát robot Mecanum theo thời gian thực",
+  };
+
+  export default function RootLayout({
+    children,
+  }: {
+    children: React.ReactNode;
+  }) {
+    return (
+      <html
+        lang="vi"
+        className={cn("h-full", "antialiased", "font-sans", roboto.variable)}
+      >
+        <body className="min-h-full">
+          <TooltipProvider>
+            <KeyboardController />
+            <AppShell>{children}</AppShell>
+          </TooltipProvider>
+        </body>
+      </html>
+    );
+  }
+  ```
+
+  **File 9: `app/client/src/app/page.tsx`**
+
+  ```tsx
+  export default function Home() {
+    return (
+      <section className="max-w-2xl">
+        <h1 className="text-xl font-semibold tracking-tight">Tổng quan</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Vận tốc đo, tư thế, quỹ đạo và sức khỏe link (FR-08, FR-12).
+        </p>
+        <p className="mt-4 rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+          Trang tạm, sẽ được thay ở T09. Bàn phím và thanh trạng thái vẫn hoạt động ở trang này.
+        </p>
+      </section>
+    );
+  }
+  ```
+
+  **File 10: `app/client/src/app/kinematics/forward/page.tsx`**
+
+  ```tsx
+  export default function Page() {
+    return (
+      <section className="max-w-2xl">
+        <h1 className="text-xl font-semibold tracking-tight">Động học thuận</h1>
+        <p className="mt-1 text-sm text-muted-foreground">Nhập tốc độ 4 bánh và xem chuỗi tính tới vận tốc thân, tư thế (FR-04).</p>
+        <p className="mt-4 rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+          Trang tạm, sẽ được thay ở T10. Bàn phím và thanh trạng thái vẫn hoạt động ở trang này.
+        </p>
+      </section>
+    );
+  }
+  ```
+
+  **File 11: `app/client/src/app/kinematics/inverse/page.tsx`**
+
+  ```tsx
+  export default function Page() {
+    return (
+      <section className="max-w-2xl">
+        <h1 className="text-xl font-semibold tracking-tight">Động học ngược</h1>
+        <p className="mt-1 text-sm text-muted-foreground">Nhập quãng đường và hướng, hoặc đích x, y, θ (FR-05, FR-06).</p>
+        <p className="mt-4 rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+          Trang tạm, sẽ được thay ở T11. Bàn phím và thanh trạng thái vẫn hoạt động ở trang này.
+        </p>
+      </section>
+    );
+  }
+  ```
+
+  **File 12: `app/client/src/app/dynamics/page.tsx`**
+
+  ```tsx
+  export default function Page() {
+    return (
+      <section className="max-w-2xl">
+        <h1 className="text-xl font-semibold tracking-tight">Động lực học</h1>
+        <p className="mt-1 text-sm text-muted-foreground">Lực và mô-men từng bánh theo thời gian thực (FR-07).</p>
+        <p className="mt-4 rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+          Trang tạm, sẽ được thay ở T12. Bàn phím và thanh trạng thái vẫn hoạt động ở trang này.
+        </p>
+      </section>
+    );
+  }
+  ```
+
+  **File 13: `app/client/src/app/lidar/page.tsx`**
+
+  ```tsx
+  export default function Page() {
+    return (
+      <section className="max-w-2xl">
+        <h1 className="text-xl font-semibold tracking-tight">LiDAR</h1>
+        <p className="mt-1 text-sm text-muted-foreground">Quét 360 độ dạng polar (FR-10).</p>
+        <p className="mt-4 rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+          Trang tạm, sẽ được thay ở T13. Bàn phím và thanh trạng thái vẫn hoạt động ở trang này.
+        </p>
+      </section>
+    );
+  }
+  ```
+
+  **File 14: `app/client/src/app/system/page.tsx`**
+
+  ```tsx
+  export default function Page() {
+    return (
+      <section className="max-w-2xl">
+        <h1 className="text-xl font-semibold tracking-tight">Hệ thống</h1>
+        <p className="mt-1 text-sm text-muted-foreground">RTT, độ trễ vòng lệnh, trạng thái thiết bị (FR-11).</p>
+        <p className="mt-4 rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+          Trang tạm, sẽ được thay ở T09. Bàn phím và thanh trạng thái vẫn hoạt động ở trang này.
+        </p>
+      </section>
+    );
+  }
+  ```
+
+  **Bước 3. Kiểm tra (chạy lần lượt trong `app/client`, báo kết quả nguyên văn của từng lệnh).**
+  1. `npx tsc --noEmit -p .`: không in gì, exit code 0. Nếu còn báo `LayoutProps`, kiểm tra File 8 đã chép đúng (kiểu tường minh); nếu vẫn lỗi, trả `BLOCKED`.
+  2. `npx eslint src`: không in gì, exit code 0. Nếu còn lỗi ở `carousel.tsx` hay `use-mobile.ts`, kiểm tra File 1; không sửa hai file đó.
+  3. `npm test`: `Test Files  2 passed (2)` và `Tests  74 passed (74)` (34 test của `mecanum.test.ts` cộng 40 test mới của `control.test.ts`).
+  4. `npm run build`: kết thúc không lỗi, phần `Route (app)` liệt kê đủ bảy route, tất cả `○ (Static)`: `/`, `/_not-found`, `/dynamics`, `/kinematics/forward`, `/kinematics/inverse`, `/lidar`, `/system`. Cảnh báo "Detected additional lockfiles" có thể xuất hiện, không sao. `next/font/google` (Roboto) cần tải font lúc build: nếu build lỗi vì không tải được font (mạng), trả `BLOCKED` kèm nguyên văn thông báo lỗi, không sửa code để né.
+  5. `grep -rn "1\.89" src`: không in gì (exit code 1 của grep là đúng).
+  6. `git status --short` (chỉ đọc) tại gốc worktree: chỉ được thấy `M app/client/eslint.config.mjs`, `M app/client/src/app/layout.tsx`, `M app/client/src/app/page.tsx`, bảy mục `??` mới (`src/robot/{protocol,control,store}.ts`, `keyboard.tsx`, `control.test.ts`, `src/components/robot/`, và các thư mục trang mới `src/app/{kinematics,dynamics,lidar,system}/`), cộng `M .claude/task/task.md` và `M .claude/plan/plan.md` đã có sẵn từ trước. `.next/`, `next-env.d.ts`, `tsconfig.tsbuildinfo` bị `.gitignore` bỏ qua. Nếu thấy file khác bị đổi, hoàn tác phần của mình và báo.
+
+  **Bước 4. Báo cáo.** Trả: danh sách file đã tạo hoặc sửa, output nguyên văn năm lệnh ở Bước 3, và mọi chỗ phải dừng. Không tự commit.
+
+  **Việc Sonnet làm khi review (không phải Haiku):** mở trình duyệt thật với app server T06 chạy `ROBOT_SIMULATE=true` (đặt `APP_ALLOWED_ORIGINS` đúng origin của trang), kiểm tra các mục `Đạt khi`: lái từ mọi trang, nhiều phím cộng vector, gõ trong ô nhập không chạy xe, `Esc` luôn dừng, rời tab gửi 0, chuyển trang không rớt WS (đếm kết nối ở `/health`), và nhìn giao diện ở độ rộng điện thoại.
+
+  **Điểm cần Opus xác nhận hoặc mở:**
+  - Task T08 `File:` và plan.md §3 thiếu `src/robot/control.ts`, `src/robot/control.test.ts`, `eslint.config.mjs` (Quyết định 7 và 8). Spec, plan và task không mâu thuẫn nhau ở T08 ngoài điểm này.
+  - Dấu phím (Quyết định 5) là cách đọc FR-02, spec chỉ nêu trục.
+  - `APP_ALLOWED_ORIGINS` mặc định chỉ có `http://100.119.83.63:3000`: mở web bằng `localhost` hay IP khác thì server trả 403 và thanh trạng thái hiện "Mất kết nối". Khi phát triển phải đặt biến này; T14 ghi vào hướng dẫn chạy.
+  - Chưa phát hiện socket "treo im lặng" (không còn state nhưng chưa `onclose`): lúc đó thanh trạng thái vẫn hiện kết nối; an toàn vẫn đủ nhờ deadman app server và robot (SAF-03b, c). Có thể thêm ở T09.
+  - `npm run build` cần tải Google Fonts (Roboto) lúc build; đã qua ở môi trường hiện tại, chưa kiểm chứng khi offline.
 
 ## P4 — Các trang
 
