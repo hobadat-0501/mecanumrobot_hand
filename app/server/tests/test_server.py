@@ -1415,3 +1415,163 @@ def test_main_binds_to_the_configured_host_and_port(monkeypatch):
 def test_main_refuses_to_start_without_tokens():
     with pytest.raises(ConfigError):
         app_main.main({"ROBOT_LINK_TOKEN": "", "OPERATOR_TOKEN": "o"})
+
+
+# ======================================================================================
+# T14: hardening
+# ======================================================================================
+
+
+def test_telemetry_cleans_health_and_charge_before_forwarding():
+    t = Telemetry()
+    msg = robot_state(vel=None)
+    msg["health"] = {
+        "stm": {
+            "ok": True,
+            "bad_nan": math.nan,
+            "bad_inf": math.inf,
+            "bad_list": [1, 2],
+            "bad_big": 10**30,
+            "text": "x" * 1000,
+        },
+        "deep": {"a": {"b": {"c": {"d": 1}}}},
+        "many": {"k%d" % i: i for i in range(100)},
+    }
+    msg["charge"] = {"current_a": math.nan, "red": 1, "charging": True, "set_state": 0}
+    t.on_robot_state(msg)
+    state = t.build_state(SNAPSHOT, True)
+    json.dumps(state, allow_nan=False)
+    assert state["health"]["stm"] == {"ok": True, "text": "x" * 200}
+    assert state["health"]["deep"] == {"a": {}}  # nesting beyond 3 levels is dropped
+    assert len(state["health"]["many"]) == 16
+    assert state["charge"] == {"red": 1, "charging": True, "set_state": 0}
+
+
+@pytest.mark.parametrize("junk", [None, [1, 2], "text", 5, True, math.nan])
+def test_telemetry_health_and_charge_must_be_objects(junk):
+    t = Telemetry()
+    msg = robot_state()
+    msg["health"] = junk
+    msg["charge"] = junk
+    t.on_robot_state(msg)
+    state = t.build_state(SNAPSHOT, True)
+    assert state["health"] is None and state["charge"] is None
+    json.dumps(state, allow_nan=False)
+
+
+@pytest.mark.parametrize("junk", [{"a": 1}, [1], "1", math.nan, math.inf, 10**30])
+def test_telemetry_flag_stop_must_be_a_bool_or_int(junk):
+    t = Telemetry()
+    msg = robot_state()
+    msg["flag_stop"] = junk
+    t.on_robot_state(msg)
+    state = t.build_state(SNAPSHOT, True)
+    assert state["flag_stop"] is None
+    json.dumps(state, allow_nan=False)
+
+
+def test_telemetry_vel_that_overflows_when_scaled_is_dropped():
+    t = Telemetry()
+    t.on_robot_state(robot_state(vel=(1e308, 0.0, 0.0)))
+    state = t.build_state(SNAPSHOT, True)
+    assert state["vel"] is None
+    json.dumps(state, allow_nan=False)
+
+
+def test_odometry_never_becomes_non_finite():
+    o = Odometry()
+    o.x = 1.79e308
+    o.update(0, 0.0, 0.0, 0.0)
+    assert o.update(STEP_NS, 1e308, 0.0, 0.0) is False  # 1.79e308 + 1e307 would be inf
+    assert o.pose()["x"] == 1.79e308
+
+
+async def test_broadcast_loop_survives_a_failing_iteration(robot):
+    async with running_app(robot.url) as app:
+        async with operator(app, drive=False) as ws:
+            real = app.runtime.telemetry.build_state
+            calls = {"n": 0}
+
+            def flaky(*args, **kwargs):
+                calls["n"] += 1
+                if calls["n"] <= 3:
+                    raise RuntimeError("boom")
+                return real(*args, **kwargs)
+
+            app.runtime.telemetry.build_state = flaky
+            await wait_until(lambda: calls["n"] > 3)
+            seen = calls["n"]
+            await asyncio.sleep(0.3)
+            assert calls["n"] >= seen + 3  # the loop kept running at about 20 Hz
+            await state_where(ws, lambda s: s["t"] == "state")
+
+
+async def test_watchdog_loop_survives_a_failing_iteration(robot):
+    async with running_app(robot.url) as app:
+        async with operator(app) as ws:
+            await arm_as_driver(ws, app)
+            session = app.runtime.session
+            real = session.watchdog_tripped
+            calls = {"n": 0}
+
+            def flaky():
+                calls["n"] += 1
+                if calls["n"] <= 3:
+                    raise RuntimeError("boom")
+                return real()
+
+            session.watchdog_tripped = flaky
+            await send(ws, t="cmd_vel", seq=1, vx=0.189, vy=0.0, wz=0.0)
+            await wait_until(lambda: nonzero(robot))
+            await wait_until(lambda: calls["n"] > 3)
+            # The command goes silent; the watchdog must still send zero after the failures.
+            await wait_until(lambda: bool(nonzero(robot)) and is_zero(robot.cmds()[-1]))
+
+
+async def test_link_loss_clears_robot_telemetry(robot):
+    async with running_app(robot.url) as app:
+        async with operator(app, drive=False) as ws:
+            await wait_until(lambda: app.runtime.link.connected)
+            await robot.send_state(robot_state(t_ns=0, seq=3))
+            seen = await state_where(
+                ws, lambda s: s["vel"] is not None and s["imu"] is not None and s["health"] is not None
+            )
+            assert seen["last_cmd_seq"] == 3
+            robot.refuse = True  # keep the link down long enough to observe it
+            await robot.drop()
+            lost = await state_where(ws, lambda s: not s["link"]["robot"])
+            assert lost["vel"] is None
+            assert lost["imu"] is None
+            assert lost["health"] is None
+            assert lost["last_cmd_seq"] is None
+            robot.refuse = False
+
+
+@pytest.mark.parametrize("path", ["/docs", "/redoc", "/openapi.json"])
+async def test_api_docs_are_disabled(robot, path):
+    async with running_app(robot.url) as app:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(app.http_url + path)
+        assert response.status_code == 404
+
+
+async def test_robot_link_measures_rtt_against_the_real_robot_server(robot):
+    link = RobotLink(
+        robot.url,
+        LINK_TOKEN,
+        on_state=lambda state: None,
+        backoff_initial_s=0.02,
+        rtt_interval_s=0.05,
+    )
+    task = asyncio.ensure_future(link.run())
+    try:
+        for _ in range(150):
+            if link.latency_s is not None:
+                break
+            await asyncio.sleep(0.02)
+        assert link.latency_s is not None
+        assert 0.0 < link.latency_s < 1.0
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert link.latency_s is None

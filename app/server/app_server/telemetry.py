@@ -15,6 +15,12 @@ from .control import CMD_VEL_DIVISOR
 MAX_DT_S = 0.5  # PHY-7: samples further apart than this are not integrated
 _NS_PER_S = 1e9
 _IMU_KEYS = ("ax", "ay", "az", "gx", "gy", "gz")
+# Limits for the free-form `health` and `charge` dicts the robot sends (forwarded to the web).
+_MAX_DEPTH = 3  # a dict nested deeper than this is dropped
+_MAX_ITEMS = 16  # keys kept per dict
+_MAX_TEXT = 200  # characters kept per string or key
+_MAX_INT = 2**53
+_DROP = object()
 
 
 def _finite(value: Any) -> bool:
@@ -36,6 +42,37 @@ def _finite_dict(data: Any, keys: Any) -> Optional[Dict[str, float]]:
             return None
         out[key] = float(data[key])
     return out
+
+
+def _clean(value: Any, depth: int = 0) -> Any:
+    """A JSON-safe copy of `value`, or _DROP. Keeps None, bool, bounded numbers, short strings and
+    bounded nested dicts; drops lists, non-finite numbers, non-str keys and anything else."""
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value if abs(value) <= _MAX_INT else _DROP
+    if isinstance(value, float):
+        return value if math.isfinite(value) else _DROP
+    if isinstance(value, str):
+        return value[:_MAX_TEXT]
+    if isinstance(value, dict) and depth < _MAX_DEPTH:
+        out: Dict[str, Any] = {}
+        for key, item in value.items():
+            if len(out) >= _MAX_ITEMS:
+                break
+            if not isinstance(key, str):
+                continue
+            cleaned = _clean(item, depth + 1)
+            if cleaned is not _DROP:
+                out[key[:_MAX_TEXT]] = cleaned
+        return out
+    return _DROP
+
+
+def _clean_dict(value: Any) -> Optional[Dict[str, Any]]:
+    """`_clean` for a field that must be a dict; None when it is not one."""
+    cleaned = _clean(value)
+    return cleaned if isinstance(cleaned, dict) else None
 
 
 def _wrap_angle(theta: float) -> float:
@@ -79,9 +116,12 @@ class Odometry:
         mid = self.theta + 0.5 * wz * dt
         cos_mid = math.cos(mid)
         sin_mid = math.sin(mid)
-        self.x += (vx * cos_mid - vy * sin_mid) * dt
-        self.y += (vx * sin_mid + vy * cos_mid) * dt
-        self.theta = _wrap_angle(self.theta + wz * dt)
+        x = self.x + (vx * cos_mid - vy * sin_mid) * dt
+        y = self.y + (vx * sin_mid + vy * cos_mid) * dt
+        theta = _wrap_angle(self.theta + wz * dt)
+        if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(theta)):
+            return False  # never let the pose become inf or NaN (it goes to the web as JSON)
+        self.x, self.y, self.theta = x, y, theta
         return True
 
     def pose(self) -> Dict[str, float]:
@@ -115,21 +155,22 @@ class Telemetry:
     def on_robot_state(self, msg: Dict[str, Any]) -> None:
         """Take one robot `state` message (PROTO-2)."""
         raw_vel = _finite_dict(msg.get("vel"), ("vx", "vy", "wz"))
-        if raw_vel is None:
-            self._vel = None
-        else:
-            self._vel = {key: value * CMD_VEL_DIVISOR for key, value in raw_vel.items()}
+        self._vel = None
+        if raw_vel is not None:
+            scaled = {key: value * CMD_VEL_DIVISOR for key, value in raw_vel.items()}
+            if all(math.isfinite(value) for value in scaled.values()):  # a huge value overflows when scaled
+                self._vel = scaled
         t_ns = msg.get("t_mono_ns")
         if self._vel is not None and isinstance(t_ns, int) and not isinstance(t_ns, bool):
             self.odometry.update(t_ns, self._vel["vx"], self._vel["vy"], self._vel["wz"])
         self._imu = _finite_dict(msg.get("imu"), _IMU_KEYS)
         voltage = msg.get("voltage")
         self._voltage = float(voltage) if _finite(voltage) else None
-        self._flag_stop = msg.get("flag_stop")
-        charge = msg.get("charge")
-        self._charge = charge if isinstance(charge, dict) else None
-        health = msg.get("health")
-        self._health = health if isinstance(health, dict) else None
+        flag_stop = msg.get("flag_stop")
+        valid_flag = isinstance(flag_stop, (bool, int)) and abs(flag_stop) <= _MAX_INT
+        self._flag_stop = flag_stop if valid_flag else None
+        self._charge = _clean_dict(msg.get("charge"))
+        self._health = _clean_dict(msg.get("health"))
         seq = msg.get("last_cmd_seq")
         valid_seq = isinstance(seq, int) and not isinstance(seq, bool)
         self._last_cmd_seq = seq if valid_seq else None

@@ -53,21 +53,18 @@ export class LatencyTracker {
   }
 
   /**
-   * State báo `last_cmd_seq` tại `nowMs`. Seq lớn nhất đang chờ mà không vượt quá nó được
-   * tính thành một mẫu; các seq cũ hơn đã bị thay thế (hàng đợi chỉ giữ bản mới nhất)
-   * nên bị bỏ, không tính vì sẽ đo quá lớn. Trả mẫu vừa ghi (ms) hoặc null.
+   * State báo `last_cmd_seq` tại `nowMs`. Chỉ khi nó khớp đúng một seq đang chờ mới có mẫu;
+   * seq khác (do tab lái khác, hoặc sau khi tải lại trang seq bắt đầu lại) bị bỏ qua. Khi khớp,
+   * các seq cũ hơn đã bị thay thế (hàng đợi chỉ giữ bản mới nhất) nên bị xóa, không tính vì
+   * sẽ đo quá lớn. Trả mẫu vừa ghi (ms) hoặc null.
    */
   ack(lastCmdSeq: number | null, nowMs: number): number | null {
     for (const [seq, at] of this.pending) {
       if (nowMs - at > this.expireMs) this.pending.delete(seq);
     }
     if (lastCmdSeq === null) return null;
-    let best: number | null = null;
-    for (const seq of this.pending.keys()) {
-      if (seq <= lastCmdSeq && (best === null || seq > best)) best = seq;
-    }
-    if (best === null) return null;
-    const sentAt = this.pending.get(best) as number;
+    const sentAt = this.pending.get(lastCmdSeq);
+    if (sentAt === undefined) return null;
     for (const seq of [...this.pending.keys()]) {
       if (seq <= lastCmdSeq) this.pending.delete(seq);
     }

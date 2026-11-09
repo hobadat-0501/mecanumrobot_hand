@@ -713,6 +713,46 @@ async def test_wrong_or_missing_token_is_refused_at_handshake(rig):
                 pass
         assert refused.value.response.status_code == 401
     assert rig.writer.calls == []
+
+
+async def _raw_handshake_status(port: int, extra_headers: bytes) -> bytes:
+    """Send a hand-written upgrade request (so headers can be malformed) and return the status line."""
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    try:
+        writer.write(
+            b"GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+            b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n"
+            + extra_headers
+            + b"\r\n"
+        )
+        await writer.drain()
+        return await asyncio.wait_for(reader.readline(), 3)
+    finally:
+        writer.close()
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        b"Authorization: Bearer " + TOKEN.encode() + b"\r\nAuthorization: Bearer " + TOKEN.encode() + b"\r\n",
+        b"Authorization: Bearer \xc3\xa9\r\n",  # non-ASCII (UTF-8 bytes)
+        b"Authorization: Bearer \xff\xfe\r\n",  # non-ASCII (invalid UTF-8)
+        b"Authorization:\r\n",
+        b"",
+    ],
+    ids=["duplicated", "non-ascii-utf8", "non-ascii-latin1", "empty", "missing"],
+)
+async def test_malformed_authorization_header_gets_401_not_500(rig, extra):
+    port = int(rig.url.rsplit(":", 1)[1].split("/")[0])
+    status = await _raw_handshake_status(port, extra)
+    assert status.startswith(b"HTTP/1.1 401"), status
+    assert rig.writer.calls == []
+
+
+async def test_valid_authorization_header_still_upgrades(rig):
+    port = int(rig.url.rsplit(":", 1)[1].split("/")[0])
+    status = await _raw_handshake_status(port, b"Authorization: Bearer " + TOKEN.encode() + b"\r\n")
+    assert status.startswith(b"HTTP/1.1 101"), status
     assert rig.writer.clears == 0
 
 

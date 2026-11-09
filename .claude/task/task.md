@@ -7770,13 +7770,1313 @@ Trạng thái: `TODO → ORDERED → CODED → PASS → MERGED` hoặc `BLOCKED`
 ## P5 — Kiểm chứng
 
 ### T14 — Kiểm thử toàn tuyến trên mô phỏng
-- Trạng thái: TODO · Plan: P5 · Phụ thuộc: T10, T11, T12, T13
+- Trạng thái: MERGED · Plan: P5 · Phụ thuộc: T10, T11, T12, T13
 - Spec: SAF-01, SAF-02, SAF-03, SAF-04, SAF-05, SAF-07, NFR-02, NFR-04, NFR-06
-- Gia cố từ review T09: `LatencyTracker.ack` khớp đúng `seq === last_cmd_seq` thay vì mọi `seq <=` để tránh mẫu sai sau khi tải lại trang hoặc có hai tab lái; hiển thị nguồn lệnh cho người xem nếu quyết định đưa `src` vào state.
+- Gia cố từ review T09: `LatencyTracker.ack` khớp đúng `seq === last_cmd_seq` thay vì mọi `seq <=` để tránh mẫu sai sau khi tải lại trang hoặc có hai tab lái. (Quyết định: không đưa `src` vào state; nguồn lệnh tính ở client.)
 - Gia cố từ các review trước: bọc thân vòng lặp `broadcast_loop` và `watchdog_loop` trong try/except có log để lỗi một vòng không làm chết vòng lặp; chỉ chuyển tiếp `health`, `charge` sau khi kiểm tra kiểu và giá trị hữu hạn; test `telemetry.clear_robot()` khi mất link; `_authorized` của robot trả 401 thay vì lỗi 500 với header hỏng.
 - Việc: chạy toàn bộ test, lint, build; `app/client/src` không chứa hệ số; bắt payload WS chứng minh web không nhận đơn vị wire; ngắt từng chặng và đo thời gian tự dừng; kiểm tra trên trình duyệt thật.
+- Sửa thêm sau review: RTT trang hệ thống luôn trống với robot thật vì `ws.latency` của keepalive không có giá trị; `RobotLink` nay đo RTT bằng ping tường minh mỗi giây (test với `RobotServer` thật). Theo dõi ở T15: lỗi ghi một lần của writer lúc robot vừa khởi động (`stm is not running`) và `scan_loop` chưa bọc try/except như hai vòng còn lại.
 - Đạt khi: tất cả qua, kết quả đo ghi vào mục này.
-- Work order: _(Sonnet điền)_
+- Work order:
+
+  **QUY TẮC ĐẦU TIÊN: Chỉ chạm các file được liệt kê dưới đây. Nếu thiếu thông tin hoặc có mâu thuẫn, dừng lại và trả `BLOCKED` kèm câu hỏi. Không chạy `git commit` (không chạy git làm đổi repo). Không tự thiết kế: chép đúng văn bản dưới đây. Không sửa `.claude/*`.**
+
+  Thư mục làm việc: `/home/vth/ws/mecanum_base` (nhánh `feature/T14-e2e`). Python: `.venv/bin/python`, `.venv/bin/pytest` ở repo gốc. Mã phải chạy trên Python 3.10 (chỉ chép, đừng thêm cú pháp mới). Mọi cổng trong test là cổng ngẫu nhiên do hệ điều hành cấp; không mở cổng cố định.
+
+  **File được phép chạm (và chỉ các file này):**
+  1. `.env.example` (sửa)
+  2. `app/server/app_server/main.py` (sửa)
+  3. `app/server/app_server/telemetry.py` (sửa)
+  4. `robot/robot_agent/server.py` (sửa)
+  5. `app/client/src/robot/telemetry.ts` (sửa)
+  6. `app/client/src/robot/telemetry.test.ts` (sửa)
+  7. `app/server/tests/test_server.py` (thêm vào cuối)
+  8. `robot/tests/test_robot.py` (thêm một khối)
+  9. `app/server/tests/test_e2e.py` (file MỚI)
+
+  Mọi khối code trong work order này bị thụt vào 2 khoảng trắng do danh sách markdown: khi chép, bỏ đúng 2 khoảng trắng đầu mỗi dòng (dòng trống giữ trống). Mọi khối CŨ/MỚI bên dưới đã được thử trên một bản sao riêng: áp dụng đúng chữ, kể cả thụt lề còn lại. Nếu một khối CŨ không khớp đúng 1 lần, dừng và trả `BLOCKED`.
+
+  **Quyết định đã chốt (không bàn lại):** không đưa `src` vào state (FR-09 vẫn do client tính). Hệ số 1.89 vẫn chỉ ở `control.py`; code mới ở `telemetry.py` KHÔNG được chứa chuỗi `1.89` (kể cả trong comment, đã có test cấm). Mốc "≤ 300 ms" của NFR-02 áp cho các sự kiện (ngắt operator, cắt link, disarm). Với trường hợp bên gửi im lặng (watchdog app server, deadman robot) lệnh cuối chỉ hết hạn sau 250 ms (SAF-03) cộng tối đa 50 ms nhịp watchdog hoặc nhịp writer, nên mốc đo là "lệnh cuối gửi đi tới số 0 ở STM32" ≤ 250 + 300 = 550 ms (đo thật khoảng 280 đến 310 ms).
+
+  ### Phần A. Gia cố
+
+  **A1. `.env.example`.** (một sửa)
+
+  *Sửa 1.* Trong `.env.example`, thay đúng khối CŨ (phải xuất hiện đúng 1 lần) bằng khối MỚI:
+
+  CŨ:
+
+  ```bash
+  # Comma-separated allowed Origin values for the operator WebSocket.
+  APP_ALLOWED_ORIGINS=http://100.119.83.63:3000
+  ```
+
+  MỚI:
+
+  ```bash
+  # Comma-separated allowed Origin values for the operator WebSocket.
+  # List EVERY origin you open the web from, exactly as the browser shows it (scheme, host, port).
+  # Any other origin gets HTTP 403 and the status bar shows "Mất kết nối". For example, to also use
+  # the dev server on this machine: http://100.119.83.63:3000,http://localhost:3000
+  APP_ALLOWED_ORIGINS=http://100.119.83.63:3000
+  ```
+
+  **A2. `app/server/app_server/main.py`.** (ba sửa: bọc `broadcast_loop`, bọc `watchdog_loop`, tắt `/docs`, `/redoc`, `/openapi.json`)
+
+  *Sửa 1.* Trong `app/server/app_server/main.py`, thay đúng khối CŨ (phải xuất hiện đúng 1 lần) bằng khối MỚI:
+
+  CŨ:
+
+  ```python
+          while True:
+              hub.publish(build_state(), session.role)
+              due += period
+  ```
+
+  MỚI:
+
+  ```python
+          while True:
+              try:
+                  hub.publish(build_state(), session.role)
+              except Exception:
+                  log.exception("broadcast iteration failed")  # one bad iteration must not end the loop
+              due += period
+  ```
+
+  *Sửa 2.* Trong `app/server/app_server/main.py`, thay đúng khối CŨ (phải xuất hiện đúng 1 lần) bằng khối MỚI:
+
+  CŨ:
+
+  ```python
+          while True:
+              if session.watchdog_tripped():
+                  link.send_zero()
+              await asyncio.sleep(watchdog_tick_s)
+  ```
+
+  MỚI:
+
+  ```python
+          while True:
+              try:
+                  if session.watchdog_tripped():
+                      link.send_zero()
+              except Exception:
+                  log.exception("watchdog iteration failed")  # keep watching, SAF-03
+              await asyncio.sleep(watchdog_tick_s)
+  ```
+
+  *Sửa 3.* Trong `app/server/app_server/main.py`, thay đúng khối CŨ (phải xuất hiện đúng 1 lần) bằng khối MỚI:
+
+  CŨ:
+
+  ```python
+      app = FastAPI(lifespan=lifespan)
+  ```
+
+  MỚI:
+
+  ```python
+      app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+  ```
+
+  **A3. `app/server/app_server/telemetry.py`.** (năm sửa. Bắt buộc theo thứ tự. Không chép comment nào có chuỗi `1.89`.) Hành vi: `health` và `charge` chỉ là dict, đã lọc (bỏ NaN/inf, list, khóa không phải chuỗi, số nguyên lớn hơn 2^53, dict lồng quá 3 tầng; tối đa 16 khóa mỗi dict; chuỗi cắt 200 ký tự); `flag_stop` chỉ nhận bool hoặc int; vận tốc nhân hệ số mà tràn ra vô cực thì bỏ; odometry không bao giờ thành inf/NaN. Mục đích: không bao giờ có NaN hay Infinity trong JSON gửi web.
+
+  *Sửa 1.* Trong `app/server/app_server/telemetry.py`, thay đúng khối CŨ (phải xuất hiện đúng 1 lần) bằng khối MỚI:
+
+  CŨ:
+
+  ```python
+  _IMU_KEYS = ("ax", "ay", "az", "gx", "gy", "gz")
+  ```
+
+  MỚI:
+
+  ```python
+  _IMU_KEYS = ("ax", "ay", "az", "gx", "gy", "gz")
+  # Limits for the free-form `health` and `charge` dicts the robot sends (forwarded to the web).
+  _MAX_DEPTH = 3  # a dict nested deeper than this is dropped
+  _MAX_ITEMS = 16  # keys kept per dict
+  _MAX_TEXT = 200  # characters kept per string or key
+  _MAX_INT = 2**53
+  _DROP = object()
+  ```
+
+  *Sửa 2.* Trong `app/server/app_server/telemetry.py`, thay đúng khối CŨ (phải xuất hiện đúng 1 lần) bằng khối MỚI:
+
+  CŨ:
+
+  ```python
+  def _wrap_angle(theta: float) -> float:
+  ```
+
+  MỚI:
+
+  ```python
+  def _clean(value: Any, depth: int = 0) -> Any:
+      """A JSON-safe copy of `value`, or _DROP. Keeps None, bool, bounded numbers, short strings and
+      bounded nested dicts; drops lists, non-finite numbers, non-str keys and anything else."""
+      if value is None or isinstance(value, bool):
+          return value
+      if isinstance(value, int):
+          return value if abs(value) <= _MAX_INT else _DROP
+      if isinstance(value, float):
+          return value if math.isfinite(value) else _DROP
+      if isinstance(value, str):
+          return value[:_MAX_TEXT]
+      if isinstance(value, dict) and depth < _MAX_DEPTH:
+          out: Dict[str, Any] = {}
+          for key, item in value.items():
+              if len(out) >= _MAX_ITEMS:
+                  break
+              if not isinstance(key, str):
+                  continue
+              cleaned = _clean(item, depth + 1)
+              if cleaned is not _DROP:
+                  out[key[:_MAX_TEXT]] = cleaned
+          return out
+      return _DROP
+
+
+  def _clean_dict(value: Any) -> Optional[Dict[str, Any]]:
+      """`_clean` for a field that must be a dict; None when it is not one."""
+      cleaned = _clean(value)
+      return cleaned if isinstance(cleaned, dict) else None
+
+
+  def _wrap_angle(theta: float) -> float:
+  ```
+
+  *Sửa 3.* Trong `app/server/app_server/telemetry.py`, thay đúng khối CŨ (phải xuất hiện đúng 1 lần) bằng khối MỚI:
+
+  CŨ:
+
+  ```python
+          mid = self.theta + 0.5 * wz * dt
+          cos_mid = math.cos(mid)
+          sin_mid = math.sin(mid)
+          self.x += (vx * cos_mid - vy * sin_mid) * dt
+          self.y += (vx * sin_mid + vy * cos_mid) * dt
+          self.theta = _wrap_angle(self.theta + wz * dt)
+          return True
+  ```
+
+  MỚI:
+
+  ```python
+          mid = self.theta + 0.5 * wz * dt
+          cos_mid = math.cos(mid)
+          sin_mid = math.sin(mid)
+          x = self.x + (vx * cos_mid - vy * sin_mid) * dt
+          y = self.y + (vx * sin_mid + vy * cos_mid) * dt
+          theta = _wrap_angle(self.theta + wz * dt)
+          if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(theta)):
+              return False  # never let the pose become inf or NaN (it goes to the web as JSON)
+          self.x, self.y, self.theta = x, y, theta
+          return True
+  ```
+
+  *Sửa 4.* Trong `app/server/app_server/telemetry.py`, thay đúng khối CŨ (phải xuất hiện đúng 1 lần) bằng khối MỚI:
+
+  CŨ:
+
+  ```python
+          if raw_vel is None:
+              self._vel = None
+          else:
+              self._vel = {key: value * CMD_VEL_DIVISOR for key, value in raw_vel.items()}
+  ```
+
+  MỚI:
+
+  ```python
+          self._vel = None
+          if raw_vel is not None:
+              scaled = {key: value * CMD_VEL_DIVISOR for key, value in raw_vel.items()}
+              if all(math.isfinite(value) for value in scaled.values()):  # a huge value overflows when scaled
+                  self._vel = scaled
+  ```
+
+  *Sửa 5.* Trong `app/server/app_server/telemetry.py`, thay đúng khối CŨ (phải xuất hiện đúng 1 lần) bằng khối MỚI:
+
+  CŨ:
+
+  ```python
+          self._flag_stop = msg.get("flag_stop")
+          charge = msg.get("charge")
+          self._charge = charge if isinstance(charge, dict) else None
+          health = msg.get("health")
+          self._health = health if isinstance(health, dict) else None
+  ```
+
+  MỚI:
+
+  ```python
+          flag_stop = msg.get("flag_stop")
+          valid_flag = isinstance(flag_stop, (bool, int)) and abs(flag_stop) <= _MAX_INT
+          self._flag_stop = flag_stop if valid_flag else None
+          self._charge = _clean_dict(msg.get("charge"))
+          self._health = _clean_dict(msg.get("health"))
+  ```
+
+  **A4. `robot/robot_agent/server.py`.** (một sửa) Header `Authorization` trùng lặp hay không phải ASCII giờ trả 401 thay vì lỗi 500.
+
+  *Sửa 1.* Trong `robot/robot_agent/server.py`, thay đúng khối CŨ (phải xuất hiện đúng 1 lần) bằng khối MỚI:
+
+  CŨ:
+
+  ```python
+      def _authorized(self, header: str | None) -> bool:
+          return hmac.compare_digest((header or "").encode("utf-8"), self._expected)
+
+      def _process_request(self, connection: Any, request: Any) -> Any:
+          if urlsplit(request.path).path != WS_PATH:
+              return connection.respond(HTTPStatus.NOT_FOUND, "not found\n")
+          if not self._authorized(request.headers.get("Authorization")):
+              return connection.respond(HTTPStatus.UNAUTHORIZED, "unauthorized\n")
+          return None
+  ```
+
+  MỚI:
+
+  ```python
+      def _authorized(self, header: str | None) -> bool:
+          try:
+              supplied = (header or "").encode("utf-8")
+          except UnicodeEncodeError:  # e.g. lone surrogates from a non-ASCII header
+              return False
+          return hmac.compare_digest(supplied, self._expected)
+
+      def _process_request(self, connection: Any, request: Any) -> Any:
+          if urlsplit(request.path).path != WS_PATH:
+              return connection.respond(HTTPStatus.NOT_FOUND, "not found\n")
+          values = request.headers.get_all("Authorization")
+          # A duplicated Authorization header is refused, never resolved by picking one.
+          if len(values) != 1 or not self._authorized(values[0]):
+              return connection.respond(HTTPStatus.UNAUTHORIZED, "unauthorized\n")
+          return None
+  ```
+
+  **A5. `app/client/src/robot/telemetry.ts`.** (một sửa) `LatencyTracker.ack` chỉ khớp đúng `seq === last_cmd_seq`.
+
+  *Sửa 1.* Trong `app/client/src/robot/telemetry.ts`, thay đúng khối CŨ (phải xuất hiện đúng 1 lần) bằng khối MỚI:
+
+  CŨ:
+
+  ```ts
+    /**
+     * State báo `last_cmd_seq` tại `nowMs`. Seq lớn nhất đang chờ mà không vượt quá nó được
+     * tính thành một mẫu; các seq cũ hơn đã bị thay thế (hàng đợi chỉ giữ bản mới nhất)
+     * nên bị bỏ, không tính vì sẽ đo quá lớn. Trả mẫu vừa ghi (ms) hoặc null.
+     */
+    ack(lastCmdSeq: number | null, nowMs: number): number | null {
+      for (const [seq, at] of this.pending) {
+        if (nowMs - at > this.expireMs) this.pending.delete(seq);
+      }
+      if (lastCmdSeq === null) return null;
+      let best: number | null = null;
+      for (const seq of this.pending.keys()) {
+        if (seq <= lastCmdSeq && (best === null || seq > best)) best = seq;
+      }
+      if (best === null) return null;
+      const sentAt = this.pending.get(best) as number;
+      for (const seq of [...this.pending.keys()]) {
+  ```
+
+  MỚI:
+
+  ```ts
+    /**
+     * State báo `last_cmd_seq` tại `nowMs`. Chỉ khi nó khớp đúng một seq đang chờ mới có mẫu;
+     * seq khác (do tab lái khác, hoặc sau khi tải lại trang seq bắt đầu lại) bị bỏ qua. Khi khớp,
+     * các seq cũ hơn đã bị thay thế (hàng đợi chỉ giữ bản mới nhất) nên bị xóa, không tính vì
+     * sẽ đo quá lớn. Trả mẫu vừa ghi (ms) hoặc null.
+     */
+    ack(lastCmdSeq: number | null, nowMs: number): number | null {
+      for (const [seq, at] of this.pending) {
+        if (nowMs - at > this.expireMs) this.pending.delete(seq);
+      }
+      if (lastCmdSeq === null) return null;
+      const sentAt = this.pending.get(lastCmdSeq);
+      if (sentAt === undefined) return null;
+      for (const seq of [...this.pending.keys()]) {
+  ```
+
+  **A6. `app/client/src/robot/telemetry.test.ts`.** (một sửa, thêm một test; ba test cũ của `LatencyTracker` giữ nguyên và vẫn phải qua)
+
+  *Sửa 1.* Trong `app/client/src/robot/telemetry.test.ts`, thay đúng khối CŨ (phải xuất hiện đúng 1 lần) bằng khối MỚI:
+
+  CŨ:
+
+  ```ts
+    it("giới hạn cửa sổ, hàng chờ, và bỏ seq quá hạn", () => {
+  ```
+
+  MỚI:
+
+  ```ts
+    it("chỉ khớp đúng last_cmd_seq, không khớp seq lớn hơn hay nhỏ hơn", () => {
+      const t = new LatencyTracker();
+      t.sent(5, 100);
+      expect(t.ack(7, 120)).toBeNull(); // seq 7 là của tab khác, không phải của tab này
+      expect(t.ack(4, 130)).toBeNull();
+      expect(t.stats().count).toBe(0);
+      expect(t.ack(5, 160)).toBe(60); // seq 5 vẫn còn chờ, không bị xóa nhầm
+    });
+
+    it("giới hạn cửa sổ, hàng chờ, và bỏ seq quá hạn", () => {
+  ```
+
+  **A7. `app/server/tests/test_server.py`.** Thêm vào CUỐI file (sau hàm `test_main_refuses_to_start_without_tokens`) đúng khối sau; khối bắt đầu bằng hai dòng trống. Không đổi gì phía trên. (21 test mới: gồm các test parametrize.)
+
+  ```python
+
+
+  # ======================================================================================
+  # T14: hardening
+  # ======================================================================================
+
+
+  def test_telemetry_cleans_health_and_charge_before_forwarding():
+      t = Telemetry()
+      msg = robot_state(vel=None)
+      msg["health"] = {
+          "stm": {
+              "ok": True,
+              "bad_nan": math.nan,
+              "bad_inf": math.inf,
+              "bad_list": [1, 2],
+              "bad_big": 10**30,
+              "text": "x" * 1000,
+          },
+          "deep": {"a": {"b": {"c": {"d": 1}}}},
+          "many": {"k%d" % i: i for i in range(100)},
+      }
+      msg["charge"] = {"current_a": math.nan, "red": 1, "charging": True, "set_state": 0}
+      t.on_robot_state(msg)
+      state = t.build_state(SNAPSHOT, True)
+      json.dumps(state, allow_nan=False)
+      assert state["health"]["stm"] == {"ok": True, "text": "x" * 200}
+      assert state["health"]["deep"] == {"a": {}}  # nesting beyond 3 levels is dropped
+      assert len(state["health"]["many"]) == 16
+      assert state["charge"] == {"red": 1, "charging": True, "set_state": 0}
+
+
+  @pytest.mark.parametrize("junk", [None, [1, 2], "text", 5, True, math.nan])
+  def test_telemetry_health_and_charge_must_be_objects(junk):
+      t = Telemetry()
+      msg = robot_state()
+      msg["health"] = junk
+      msg["charge"] = junk
+      t.on_robot_state(msg)
+      state = t.build_state(SNAPSHOT, True)
+      assert state["health"] is None and state["charge"] is None
+      json.dumps(state, allow_nan=False)
+
+
+  @pytest.mark.parametrize("junk", [{"a": 1}, [1], "1", math.nan, math.inf, 10**30])
+  def test_telemetry_flag_stop_must_be_a_bool_or_int(junk):
+      t = Telemetry()
+      msg = robot_state()
+      msg["flag_stop"] = junk
+      t.on_robot_state(msg)
+      state = t.build_state(SNAPSHOT, True)
+      assert state["flag_stop"] is None
+      json.dumps(state, allow_nan=False)
+
+
+  def test_telemetry_vel_that_overflows_when_scaled_is_dropped():
+      t = Telemetry()
+      t.on_robot_state(robot_state(vel=(1e308, 0.0, 0.0)))
+      state = t.build_state(SNAPSHOT, True)
+      assert state["vel"] is None
+      json.dumps(state, allow_nan=False)
+
+
+  def test_odometry_never_becomes_non_finite():
+      o = Odometry()
+      o.x = 1.79e308
+      o.update(0, 0.0, 0.0, 0.0)
+      assert o.update(STEP_NS, 1e308, 0.0, 0.0) is False  # 1.79e308 + 1e307 would be inf
+      assert o.pose()["x"] == 1.79e308
+
+
+  async def test_broadcast_loop_survives_a_failing_iteration(robot):
+      async with running_app(robot.url) as app:
+          async with operator(app, drive=False) as ws:
+              real = app.runtime.telemetry.build_state
+              calls = {"n": 0}
+
+              def flaky(*args, **kwargs):
+                  calls["n"] += 1
+                  if calls["n"] <= 3:
+                      raise RuntimeError("boom")
+                  return real(*args, **kwargs)
+
+              app.runtime.telemetry.build_state = flaky
+              await wait_until(lambda: calls["n"] > 3)
+              seen = calls["n"]
+              await asyncio.sleep(0.3)
+              assert calls["n"] >= seen + 3  # the loop kept running at about 20 Hz
+              await state_where(ws, lambda s: s["t"] == "state")
+
+
+  async def test_watchdog_loop_survives_a_failing_iteration(robot):
+      async with running_app(robot.url) as app:
+          async with operator(app) as ws:
+              await arm_as_driver(ws, app)
+              session = app.runtime.session
+              real = session.watchdog_tripped
+              calls = {"n": 0}
+
+              def flaky():
+                  calls["n"] += 1
+                  if calls["n"] <= 3:
+                      raise RuntimeError("boom")
+                  return real()
+
+              session.watchdog_tripped = flaky
+              await send(ws, t="cmd_vel", seq=1, vx=0.189, vy=0.0, wz=0.0)
+              await wait_until(lambda: nonzero(robot))
+              await wait_until(lambda: calls["n"] > 3)
+              # The command goes silent; the watchdog must still send zero after the failures.
+              await wait_until(lambda: bool(nonzero(robot)) and is_zero(robot.cmds()[-1]))
+
+
+  async def test_link_loss_clears_robot_telemetry(robot):
+      async with running_app(robot.url) as app:
+          async with operator(app, drive=False) as ws:
+              await wait_until(lambda: app.runtime.link.connected)
+              await robot.send_state(robot_state(t_ns=0, seq=3))
+              seen = await state_where(
+                  ws, lambda s: s["vel"] is not None and s["imu"] is not None and s["health"] is not None
+              )
+              assert seen["last_cmd_seq"] == 3
+              robot.refuse = True  # keep the link down long enough to observe it
+              await robot.drop()
+              lost = await state_where(ws, lambda s: not s["link"]["robot"])
+              assert lost["vel"] is None
+              assert lost["imu"] is None
+              assert lost["health"] is None
+              assert lost["last_cmd_seq"] is None
+              robot.refuse = False
+
+
+  @pytest.mark.parametrize("path", ["/docs", "/redoc", "/openapi.json"])
+  async def test_api_docs_are_disabled(robot, path):
+      async with running_app(robot.url) as app:
+          async with httpx.AsyncClient() as client:
+              response = await client.get(app.http_url + path)
+          assert response.status_code == 404
+  ```
+
+  **A8. `robot/tests/test_robot.py`.** Ngay sau hàm `test_wrong_or_missing_token_is_refused_at_handshake`, tức sau đúng đoạn (xuất hiện đúng 1 lần)
+
+  ```python
+          assert refused.value.response.status_code == 401
+      assert rig.writer.calls == []
+  ```
+
+  chèn khối sau (bắt đầu bằng hai dòng trống, ngay sau dòng `    assert rig.writer.calls == []` đó, trước hàm `test_other_path_is_refused`). 6 test mới.
+
+  ```python
+
+
+  async def _raw_handshake_status(port: int, extra_headers: bytes) -> bytes:
+      """Send a hand-written upgrade request (so headers can be malformed) and return the status line."""
+      reader, writer = await asyncio.open_connection("127.0.0.1", port)
+      try:
+          writer.write(
+              b"GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+              b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n"
+              + extra_headers
+              + b"\r\n"
+          )
+          await writer.drain()
+          return await asyncio.wait_for(reader.readline(), 3)
+      finally:
+          writer.close()
+
+
+  @pytest.mark.parametrize(
+      "extra",
+      [
+          b"Authorization: Bearer " + TOKEN.encode() + b"\r\nAuthorization: Bearer " + TOKEN.encode() + b"\r\n",
+          b"Authorization: Bearer \xc3\xa9\r\n",  # non-ASCII (UTF-8 bytes)
+          b"Authorization: Bearer \xff\xfe\r\n",  # non-ASCII (invalid UTF-8)
+          b"Authorization:\r\n",
+          b"",
+      ],
+      ids=["duplicated", "non-ascii-utf8", "non-ascii-latin1", "empty", "missing"],
+  )
+  async def test_malformed_authorization_header_gets_401_not_500(rig, extra):
+      port = int(rig.url.rsplit(":", 1)[1].split("/")[0])
+      status = await _raw_handshake_status(port, extra)
+      assert status.startswith(b"HTTP/1.1 401"), status
+      assert rig.writer.calls == []
+
+
+  async def test_valid_authorization_header_still_upgrades(rig):
+      port = int(rig.url.rsplit(":", 1)[1].split("/")[0])
+      status = await _raw_handshake_status(port, b"Authorization: Bearer " + TOKEN.encode() + b"\r\n")
+      assert status.startswith(b"HTTP/1.1 101"), status
+  ```
+
+  ### Phần B. Test toàn tuyến `app/server/tests/test_e2e.py` (FILE MỚI)
+
+  Tạo file với đúng nội dung sau (không đổi chữ nào). Nó chạy trong một tiến trình: `RobotServer` thật + `CmdVelWriter` thật (luồng thật) + `SimulatedStm32`/`SimulatedLidar` trên `127.0.0.1` cổng ngẫu nhiên, app server thật (`create_app` dưới uvicorn, cổng ngẫu nhiên), client là `websockets` thuần. Đồng hồ đo là `time.monotonic()`. Mỗi số đo in một dòng bắt đầu bằng `[e2e]`; xem bằng `-s`. Phép đo thời gian lặp 3 lần (trung vị phải đạt mốc, lần tệ nhất không quá 2 lần mốc; p95 vòng lệnh được phép thử lại tối đa 3 lần). Ánh xạ tới yêu cầu: (a) SAF-01 là test `test_units_...`; (b) SAF-02/03/05/07 là `test_disarmed_by_default_...`, `test_wrong_robot_token_...`, `test_writer_forces_zero_...`; (c) NFR-02 và SAF-03 là `test_command_loop_latency_...`, `test_zero_after_the_operator_socket_drops`, `test_zero_when_the_app_server_stops_sending_the_watchdog`, `test_zero_and_no_resumption_when_the_robot_link_is_cut` (cũng là (d)), `test_zero_after_disarm`, `test_robot_deadman_...`; (e) SAF-04 là `test_large_finite_values_...`. Tổng 11 test.
+
+  ```python
+  """T14 end-to-end tests, in one process, no browser.
+
+  Real pieces: RobotServer + CmdVelWriter (a real thread) + SimulatedStm32/SimulatedLidar on
+  127.0.0.1 with an ephemeral port, the real app server (`app_server.main.create_app` under uvicorn,
+  ephemeral port) and plain `websockets` clients standing in for the browser.
+
+  Timings use time.monotonic(). Every measured number is printed as a line starting with "[e2e]";
+  run with `pytest app/server/tests/test_e2e.py -s` to see them. To stay robust under CPU load a
+  timing check repeats (3 trials; the median must meet the bound and the worst must stay within
+  twice the bound) instead of trusting one sample.
+  """
+
+  import asyncio
+  import dataclasses
+  import json
+  import math
+  import statistics
+  import struct
+  import time
+  from contextlib import asynccontextmanager
+  from types import SimpleNamespace
+
+  import pytest
+  import uvicorn
+  from websockets.asyncio.client import connect
+  from websockets.exceptions import ConnectionClosed, InvalidStatus
+
+  from app_server.config import load_settings
+  from app_server.main import create_app
+  from robot_agent.drive import CmdVelWriter
+  from robot_agent.server import RobotServer
+  from robot_agent.sim import SimulatedLidar, SimulatedStm32
+
+  LINK_TOKEN = "e2e-link-token"
+  OPERATOR_TOKEN = "e2e-operator-token"
+  ORIGIN = "http://100.119.83.63:3000"
+  FACTOR = 1.89  # only used here to prove that nothing on the web side carries it
+
+  LOOP_P95_BOUND_S = 0.150  # NFR-02: cmd_vel -> last_cmd_seq in state
+  STOP_BOUND_S = 0.300  # NFR-02 / SAF-03: event -> zero at the STM32 (operator gone, link cut, disarm)
+  SILENCE_DEADLINE_S = 0.250  # SAF-03: no command for 250 ms
+  SILENCE_BOUND_S = SILENCE_DEADLINE_S + 0.300  # last command -> zero when the sender goes quiet
+  FLAG_BOUND_S = 0.500  # SAF-05: stop flag or stale telemetry -> zero
+
+
+  # ---- the robot side ----
+
+
+  class E2eStm(SimulatedStm32):
+      """SimulatedStm32 that logs every velocity written and can fake a stop flag or old telemetry."""
+
+      def __init__(self):
+          super().__init__()
+          self.log = []  # (time.monotonic(), vx, vy, wz) for each successful write, wire units
+          self.flag_stop = 0
+          self.telemetry_age_ns = 0
+
+      @property
+      def latest(self):
+          sample = SimulatedStm32.latest.fget(self)
+          if sample is None:
+              return None
+          return dataclasses.replace(
+              sample, flag_stop=self.flag_stop, t_ns=sample.t_ns - self.telemetry_age_ns
+          )
+
+      def send_velocity(self, vx_mps, vy_mps, wz_radps):
+          super().send_velocity(vx_mps, vy_mps, wz_radps)
+          self.log.append((time.monotonic(), float(vx_mps), float(vy_mps), float(wz_radps)))
+
+
+  def is_zero(entry):
+      return entry[1] == 0.0 and entry[2] == 0.0 and entry[3] == 0.0
+
+
+  def nonzero_entries(stm):
+      return [e for e in list(stm.log) if not is_zero(e)]
+
+
+  async def wait_until(condition, timeout=3.0, step=0.005):
+      deadline = time.monotonic() + timeout
+      while time.monotonic() < deadline:
+          if condition():
+              return
+          await asyncio.sleep(step)
+      raise AssertionError("condition not met in time")
+
+
+  async def zero_latency(stm, t0, timeout=2.0):
+      """Seconds from t0 until the first zero written to the STM32 simulator at or after t0."""
+      deadline = time.monotonic() + timeout
+      while True:
+          for entry in list(stm.log):
+              if entry[0] >= t0 and is_zero(entry):
+                  return entry[0] - t0
+          if time.monotonic() > deadline:
+              raise AssertionError("no zero reached the STM32 simulator")
+          await asyncio.sleep(0.002)
+
+
+  async def assert_stays_zero(stm, t_zero, seconds=0.3):
+      """After the first zero at t_zero nothing but zero is written for `seconds`."""
+      await asyncio.sleep(seconds)
+      late = [e for e in list(stm.log) if e[0] > t_zero and not is_zero(e)]
+      assert late == [], "motion resumed after the stop: %r" % (late[:3],)
+
+
+  def assert_moving(stm):
+      """The simulator is being driven right now: the newest write is fresh and not zero."""
+      last = stm.log[-1]
+      assert not is_zero(last) and time.monotonic() - last[0] < 0.2, "the robot is not moving"
+
+
+  async def run_trials(label, trial, bound, *, floor=0.0, trials=3):
+      results = []
+      for _ in range(trials):
+          results.append(await trial())
+      median = statistics.median(results)
+      shown = ", ".join("%.0f ms" % (x * 1000) for x in results)
+      print("[e2e] %s: %s | median %.0f ms, bound %.0f ms" % (label, shown, median * 1000, bound * 1000))
+      assert median <= bound, (label, results)
+      assert max(results) <= 2 * bound, (label, results)
+      assert min(results) >= floor, (label, results)
+      return results
+
+
+  # ---- the rig: robot server + simulators + app server ----
+
+
+  @asynccontextmanager
+  async def running_app(robot_url, link_token):
+      settings = load_settings(
+          {
+              "ROBOT_LINK_TOKEN": link_token,
+              "OPERATOR_TOKEN": OPERATOR_TOKEN,
+              "ROBOT_WS_URL": robot_url,
+              "APP_ALLOWED_ORIGINS": ORIGIN,
+          }
+      )
+      app = create_app(settings, backoff_initial_s=0.02, backoff_max_s=0.1)
+      server = uvicorn.Server(
+          uvicorn.Config(
+              app,
+              host="127.0.0.1",
+              port=0,
+              log_level="warning",
+              lifespan="on",
+              timeout_graceful_shutdown=2,
+          )
+      )
+      task = asyncio.ensure_future(server.serve())
+      try:
+          deadline = time.monotonic() + 5.0
+          while not server.started:
+              if task.done():
+                  task.result()
+              if time.monotonic() > deadline:
+                  raise AssertionError("app server did not start")
+              await asyncio.sleep(0.01)
+          port = server.servers[0].sockets[0].getsockname()[1]
+          yield SimpleNamespace(ws_url="ws://127.0.0.1:%d/ws/operator" % port, runtime=app.state.runtime)
+      finally:
+          server.should_exit = True
+          await asyncio.wait_for(task, 10)
+
+
+  @asynccontextmanager
+  async def rig(*, deadman_s=0.25, app_link_token=LINK_TOKEN, with_app=True):
+      """The robot side always; the app server only when with_app."""
+      stm = E2eStm()
+      stm.start()
+      lidar = SimulatedLidar()
+      lidar.start()
+      writer = CmdVelWriter(stm, motion_enabled=True, deadman_s=deadman_s)
+      writer.start()
+      health = {"ok": True, "state": "ok", "error": None, "restarts": 0}
+      robot = RobotServer(
+          token=LINK_TOKEN,
+          writer=writer,
+          stm=stm,
+          devices=lambda: {"stm": health, "lidar": health},
+          lidar=lidar,
+      )
+      port = await robot.start("127.0.0.1", 0)
+      robot_url = "ws://127.0.0.1:%d/ws" % port
+      try:
+          if with_app:
+              async with running_app(robot_url, app_link_token) as app:
+                  yield SimpleNamespace(stm=stm, writer=writer, robot=robot, robot_url=robot_url, app=app)
+          else:
+              yield SimpleNamespace(stm=stm, writer=writer, robot=robot, robot_url=robot_url, app=None)
+      finally:
+          await robot.close()
+          writer.stop()
+          lidar.stop()
+          stm.stop()
+
+
+  # ---- the web side: a plain websockets client that records everything it receives ----
+
+
+  class Web:
+      def __init__(self, ws):
+          self.ws = ws
+          self.texts = []  # every text frame, as received
+          self.frames = []  # every binary frame
+          self.states = []  # (time.monotonic() at receipt, decoded state)
+          self.task = asyncio.ensure_future(self._read())
+
+      async def _read(self):
+          try:
+              async for message in self.ws:
+                  now = time.monotonic()
+                  if isinstance(message, bytes):
+                      self.frames.append(message)
+                      continue
+                  self.texts.append(message)
+                  data = json.loads(message)
+                  if data.get("t") == "state":
+                      self.states.append((now, data))
+          except ConnectionClosed:
+              pass
+
+      async def send(self, **message):
+          await self.ws.send(json.dumps(message))
+
+      async def send_raw(self, text):
+          await self.ws.send(text)
+
+      async def wait_state(self, predicate, *, since=0, timeout=3.0):
+          """(receipt time, state) of the first state at index >= since that satisfies predicate."""
+          deadline = time.monotonic() + timeout
+          index = since
+          while True:
+              while index < len(self.states):
+                  stamp, state = self.states[index]
+                  index += 1
+                  if predicate(state):
+                      return stamp, state
+              if time.monotonic() > deadline:
+                  raise AssertionError("no matching state received")
+              await asyncio.sleep(0.002)
+
+
+  @asynccontextmanager
+  async def web_connect(app, *, origin=ORIGIN):
+      async with connect(app.ws_url, origin=origin, open_timeout=5) as ws:
+          web = Web(ws)
+          try:
+              yield web
+          finally:
+              web.task.cancel()
+              await asyncio.gather(web.task, return_exceptions=True)
+
+
+  async def wait_link(app):
+      await wait_until(lambda: app.runtime.link.connected)
+
+
+  async def become_driver_and_arm(web, app, *, arm=True):
+      await wait_link(app)
+      since = len(web.states)
+      await web.send(t="hello", token=OPERATOR_TOKEN)
+      await web.wait_state(
+          lambda s: s["session"]["role"] == "driver" and s["link"]["robot"], since=since
+      )
+      if arm:
+          since = len(web.states)
+          await web.send(t="arm", on=True)
+          await web.wait_state(lambda s: s["session"]["armed"], since=since)
+
+
+  async def drive_for(web, seq, seconds, vx=0.189):
+      """Send cmd_vel at 20 Hz for `seconds`. Returns (last seq, monotonic time of the last send)."""
+      end = time.monotonic() + seconds
+      sent_at = time.monotonic()
+      while True:
+          seq += 1
+          sent_at = time.monotonic()
+          await web.send(t="cmd_vel", seq=seq, vx=vx, vy=0.0, wz=0.0, src="kbd")
+          if sent_at + 0.05 >= end:
+              return seq, sent_at
+          await asyncio.sleep(0.05)
+
+
+  @asynccontextmanager
+  async def bare_app_server(robot_url):
+      """A plain client playing the app server on the robot link. It reads (and ignores) the state
+      stream, as the real one does; an unread stream would stall the close handshake."""
+
+      async def drain(ws):
+          try:
+              async for _ in ws:
+                  pass
+          except ConnectionClosed:
+              pass
+
+      async with connect(robot_url, additional_headers={"Authorization": "Bearer " + LINK_TOKEN}) as ws:
+          reader = asyncio.ensure_future(drain(ws))
+          try:
+              yield ws
+          finally:
+              reader.cancel()
+              await asyncio.gather(reader, return_exceptions=True)
+
+
+  def percentile(values, p):
+      ordered = sorted(values)
+      return ordered[min(len(ordered) - 1, max(0, math.ceil(p * len(ordered)) - 1))]
+
+
+  # ======================================================================================
+  # (a) SAF-01: units
+  # ======================================================================================
+
+
+  def numbers_below(value, path=()):
+      """Yield (path, key-or-None, number-or-None): every dict key and every numeric leaf."""
+      if isinstance(value, dict):
+          for key, item in value.items():
+              yield path, key, None
+              yield from numbers_below(item, path + (key,))
+      elif isinstance(value, list):
+          for item in value:
+              yield from numbers_below(item, path)
+      elif isinstance(value, (int, float)) and not isinstance(value, bool):
+          yield path, None, value
+
+
+  async def test_units_web_0_189_is_robot_0_1_and_the_web_never_sees_wire_values():
+      async with rig() as r:
+          async with web_connect(r.app) as web:
+              await become_driver_and_arm(web, r.app)
+              seq = 0
+              seq, _ = await drive_for(web, seq, 1.2)
+              # Robot side: every non-zero write is 0.189 / 1.89 = 0.1 (wire units).
+              moving = nonzero_entries(r.stm)
+              assert moving
+              for entry in moving:
+                  assert entry[1] == pytest.approx(0.1) and entry[2] == 0.0 and entry[3] == 0.0
+              # Web side: the robot's 0.1 comes back as 0.189, and the command in web units too.
+              _, state = web.states[-1]
+              assert state["vel"]["vx"] == pytest.approx(0.189, abs=0.003)
+              assert state["cmd"]["vx"] == pytest.approx(0.189)
+              assert state["last_cmd_seq"] in range(seq - 3, seq + 1)
+
+              # Nothing received by the web may carry a wire value, the factor or its inverse.
+              forbidden = (0.1, FACTOR, 1 / FACTOR)
+              assert len(web.texts) >= 10
+              for text in web.texts:
+                  for path, key, number in numbers_below(json.loads(text)):
+                      if key is not None:
+                          assert not any(w in key.lower() for w in ("wire", "divisor", "factor", "scale"))
+                      elif path not in (("pose",), ("link",)):  # pose integrates, rtt_ms is a time
+                          assert not any(math.isclose(number, f, rel_tol=1e-6) for f in forbidden), (
+                              path,
+                              number,
+                          )
+              # Binary scan frames: PROTO-2 shape, and no packed copy of those numbers.
+              assert len(web.frames) >= 2
+              for frame in web.frames:
+                  assert len(frame) == 734 and frame[0] == 2 and frame[1] == 1
+                  for number in forbidden:
+                      for fmt in ("<d", "<f"):
+                          assert struct.pack(fmt, number) not in frame
+
+
+  # ======================================================================================
+  # (b) SAF-02, SAF-03, SAF-07: disarmed by default, viewer, origin, tokens
+  # ======================================================================================
+
+
+  async def test_disarmed_by_default_viewer_cannot_drive_bad_origin_refused():
+      async with rig() as r:
+          await wait_link(r.app)
+          for origin in ("http://evil.example", "http://localhost:3000", None):
+              with pytest.raises(InvalidStatus) as refused:
+                  async with connect(r.app.ws_url, origin=origin):
+                      pass
+              assert refused.value.response.status_code == 403
+          assert len(r.app.runtime.hub) == 0
+
+          async with web_connect(r.app) as viewer:
+              _, state = await viewer.wait_state(lambda s: True)
+              assert state["session"]["armed"] is False  # SAF-02
+              assert state["session"]["role"] == "viewer"
+              # A viewer, and a client with the wrong operator token, cannot arm or drive.
+              await viewer.send(t="arm", on=True)
+              await viewer.send(t="hello", token="wrong-token")
+              await viewer.send(t="arm", on=True)
+              await viewer.send(t="cmd_vel", seq=1, vx=0.189, vy=0.0, wz=0.0, src="kbd")
+              await asyncio.sleep(0.4)
+              _, state = viewer.states[-1]
+              assert state["session"]["armed"] is False and state["session"]["role"] == "viewer"
+              assert nonzero_entries(r.stm) == []
+
+              # The real operator: still disarmed until arm; a command while disarmed goes nowhere.
+              await become_driver_and_arm(viewer, r.app, arm=False)
+              _, state = viewer.states[-1]
+              assert state["session"]["armed"] is False
+              await viewer.send(t="cmd_vel", seq=2, vx=0.189, vy=0.0, wz=0.0, src="kbd")
+              await asyncio.sleep(0.4)
+              assert nonzero_entries(r.stm) == []
+              since = len(viewer.states)
+              await viewer.send(t="arm", on=True)
+              await viewer.wait_state(lambda s: s["session"]["armed"], since=since)
+              await viewer.send(t="cmd_vel", seq=3, vx=0.189, vy=0.0, wz=0.0, src="kbd")
+              await wait_until(lambda: nonzero_entries(r.stm))
+
+
+  async def test_wrong_robot_token_is_refused_at_both_ends():
+      async with rig(app_link_token="not-the-link-token") as r:
+          # The app server presents a wrong token: the robot refuses, the link never comes up.
+          await asyncio.sleep(0.6)
+          assert r.app.runtime.link.connected is False
+          async with web_connect(r.app) as web:
+              await web.send(t="hello", token=OPERATOR_TOKEN)
+              await web.send(t="arm", on=True)  # no arming while the robot link is down
+              await asyncio.sleep(0.3)
+              _, state = web.states[-1]
+              assert state["link"]["robot"] is False and state["session"]["armed"] is False
+          # A direct client with a wrong or missing token gets 401 and cannot move anything.
+          for headers in ({"Authorization": "Bearer wrong"}, {}):
+              with pytest.raises(InvalidStatus) as refused:
+                  async with connect(r.robot_url, additional_headers=headers):
+                      pass
+              assert refused.value.response.status_code == 401
+          assert nonzero_entries(r.stm) == []
+
+
+  # ======================================================================================
+  # (c) NFR-02: command loop latency
+  # ======================================================================================
+
+
+  async def measure_loop(web, seq0, count):
+      """cmd_vel sent -> first state whose last_cmd_seq equals that seq (as the client matches it)."""
+      latencies = []
+      for i in range(count):
+          seq = seq0 + i + 1
+          since = len(web.states)
+          t0 = time.monotonic()
+          await web.send(t="cmd_vel", seq=seq, vx=0.189, vy=0.0, wz=0.0, src="kbd")
+          stamp, _ = await web.wait_state(lambda s, q=seq: s["last_cmd_seq"] == q, since=since)
+          latencies.append(stamp - t0)
+          # A varying gap (20 to 80 ms, always inside the 250 ms command timeout) so the samples are
+          # not locked to the 20 Hz state tick.
+          await asyncio.sleep(0.02 + 0.01 * ((i * 5) % 7))
+      return latencies
+
+
+  async def test_command_loop_latency_p95_within_150_ms_over_60_commands():
+      attempts = []
+      async with rig() as r:
+          async with web_connect(r.app) as web:
+              await become_driver_and_arm(web, r.app)
+              seq0 = 0
+              for _ in range(3):  # a CPU spike may ruin one run; the bound must hold in one of three
+                  latencies = await measure_loop(web, seq0, 60)
+                  seq0 += 60
+                  assert len(latencies) == 60
+                  p95 = percentile(latencies, 0.95)
+                  attempts.append(p95)
+                  print(
+                      "[e2e] command loop latency (60 cmds): p50 %.0f ms, p95 %.0f ms, max %.0f ms"
+                      % (
+                          statistics.median(latencies) * 1000,
+                          p95 * 1000,
+                          max(latencies) * 1000,
+                      )
+                  )
+                  if p95 <= LOOP_P95_BOUND_S:
+                      break
+              # While the command was held the robot never saw a stray zero.
+              assert_moving(r.stm)
+      assert min(attempts) <= LOOP_P95_BOUND_S, attempts
+
+
+  # ======================================================================================
+  # (c) SAF-03 timings: zero reaches the STM32 simulator
+  # ======================================================================================
+
+
+  async def test_zero_after_the_operator_socket_drops():
+      async with rig() as r:
+
+          async def trial():
+              async with web_connect(r.app) as web:
+                  await become_driver_and_arm(web, r.app)
+                  await drive_for(web, 0, 0.4)
+                  assert_moving(r.stm)
+                  t0 = time.monotonic()
+                  web.ws.transport.abort()  # the browser vanishes: no close frame
+                  latency = await zero_latency(r.stm, t0)
+                  await assert_stays_zero(r.stm, t0 + latency)
+              await wait_until(
+                  lambda: not r.app.runtime.session.armed and r.app.runtime.session.driver is None
+              )
+              return latency
+
+          await run_trials("operator socket drop -> zero", trial, STOP_BOUND_S)
+
+
+  async def test_zero_when_the_app_server_stops_sending_the_watchdog():
+      # The robot-side deadman is set to 5 s so that only the app server watchdog can stop it.
+      async with rig(deadman_s=5.0) as r:
+
+          async def trial():
+              async with web_connect(r.app) as web:
+                  await become_driver_and_arm(web, r.app)
+                  _, last_sent = await drive_for(web, 0, 0.4)
+                  assert_moving(r.stm)
+                  latency = await zero_latency(r.stm, last_sent)  # from the last command sent
+                  await assert_stays_zero(r.stm, last_sent + latency)
+                  assert r.app.runtime.session.armed is True  # still armed: only the command expired
+                  return latency
+
+          await run_trials(
+              "app watchdog (last cmd -> zero)", trial, SILENCE_BOUND_S, floor=0.8 * SILENCE_DEADLINE_S
+          )
+
+
+  async def test_zero_and_no_resumption_when_the_robot_link_is_cut():
+      async with rig() as r:
+
+          async def trial():
+              async with web_connect(r.app) as web:
+                  await become_driver_and_arm(web, r.app)
+                  seq, _ = await drive_for(web, 0, 0.4)
+                  assert_moving(r.stm)
+                  link = r.app.runtime.link
+                  assert link._ws is not None
+                  t0 = time.monotonic()
+                  link._ws.transport.abort()  # the cable is pulled: no close frame
+                  latency = await zero_latency(r.stm, t0)
+                  t_zero = t0 + latency
+                  # The operator keeps pressing the key during the outage and after recovery.
+                  since = len(web.states)
+                  seq, _ = await drive_for(web, seq, 0.5)
+                  await wait_until(lambda: link.connected)  # the link came back by itself
+                  seq, _ = await drive_for(web, seq, 0.5)
+                  # (d) Disarmed by the loss, so none of those commands ran and nothing old resumed
+                  # (the new link starts with a zero command).
+                  await assert_stays_zero(r.stm, t_zero, 0.1)
+                  _, state = web.states[-1]
+                  assert state["session"]["armed"] is False and state["link"]["robot"] is True
+                  assert any(not s["link"]["robot"] or not s["session"]["armed"] for _, s in web.states[since:])
+              await wait_until(lambda: r.app.runtime.session.driver is None)
+              return latency
+
+          await run_trials("robot link cut -> zero", trial, STOP_BOUND_S)
+
+
+  async def test_zero_after_disarm():
+      async with rig() as r:
+
+          async def trial():
+              async with web_connect(r.app) as web:
+                  await become_driver_and_arm(web, r.app)
+                  seq, _ = await drive_for(web, 0, 0.4)
+                  assert_moving(r.stm)
+                  t0 = time.monotonic()
+                  await web.send(t="arm", on=False)
+                  latency = await zero_latency(r.stm, t0)
+                  # Commands keep coming after the disarm; none may reach the robot.
+                  await drive_for(web, seq, 0.4)
+                  late = [e for e in list(r.stm.log) if e[0] > t0 + latency and not is_zero(e)]
+                  assert late == []
+                  _, state = web.states[-1]
+                  assert state["session"]["armed"] is False
+                  return latency
+
+          await run_trials("disarm -> zero", trial, STOP_BOUND_S)
+
+
+  async def test_robot_deadman_stops_the_robot_when_the_app_server_is_killed_hard():
+      # No app server: a bare client plays the app server. It sends commands, then goes silent with
+      # the socket still open (a frozen or partitioned app server), so only the robot deadman acts.
+      async with rig(with_app=False) as r:
+
+          async def frozen_trial():
+              async with bare_app_server(r.robot_url) as ws:
+                  last_sent = time.monotonic()
+                  for seq in range(1, 9):
+                      last_sent = time.monotonic()
+                      await ws.send(json.dumps({"t": "cmd_vel", "seq": seq, "vx": 0.1, "vy": 0.0, "wz": 0.0}))
+                      await asyncio.sleep(0.05)
+                  assert_moving(r.stm)
+                  latency = await zero_latency(r.stm, last_sent)
+                  await assert_stays_zero(r.stm, last_sent + latency)
+                  return latency
+
+          await run_trials(
+              "robot deadman, sender frozen (last cmd -> zero)",
+              frozen_trial,
+              SILENCE_BOUND_S,
+              floor=0.8 * SILENCE_DEADLINE_S,
+          )
+
+          async def killed_trial():
+              async with bare_app_server(r.robot_url) as ws:
+                  for seq in range(1, 9):
+                      await ws.send(json.dumps({"t": "cmd_vel", "seq": seq, "vx": 0.1, "vy": 0.0, "wz": 0.0}))
+                      await asyncio.sleep(0.05)
+                  assert_moving(r.stm)
+                  t0 = time.monotonic()
+                  ws.transport.abort()  # kill -9: the kernel resets the connection
+                  latency = await zero_latency(r.stm, t0)
+                  await assert_stays_zero(r.stm, t0 + latency)
+                  return latency
+
+          await run_trials("robot link lost, sender killed -> zero", killed_trial, STOP_BOUND_S)
+
+
+  # ======================================================================================
+  # (c) SAF-05: stop flag and stale telemetry force zero
+  # ======================================================================================
+
+
+  async def test_writer_forces_zero_on_stop_flag_and_stale_telemetry():
+      async with rig() as r:
+          async with web_connect(r.app) as web:
+              await become_driver_and_arm(web, r.app)
+              seq = 0
+              for label, engage, release in (
+                  ("stop flag", lambda: setattr(r.stm, "flag_stop", 1), lambda: setattr(r.stm, "flag_stop", 0)),
+                  (
+                      "stale telemetry",
+                      lambda: setattr(r.stm, "telemetry_age_ns", 600_000_000),
+                      lambda: setattr(r.stm, "telemetry_age_ns", 0),
+                  ),
+              ):
+                  seq, _ = await drive_for(web, seq, 0.4)
+                  assert_moving(r.stm)
+                  t0 = time.monotonic()
+                  engage()
+                  latency = await zero_latency(r.stm, t0)
+                  print("[e2e] SAF-05 %s -> zero: %.0f ms (bound %.0f ms)" % (label, latency * 1000, FLAG_BOUND_S * 1000))
+                  assert latency <= FLAG_BOUND_S
+                  # Fresh commands keep arriving, yet the writer keeps writing zero while it lasts.
+                  seq, _ = await drive_for(web, seq, 0.5)
+                  late = [e for e in list(r.stm.log) if e[0] > t0 + latency and not is_zero(e)]
+                  assert late == [], label
+                  release()
+                  seq, _ = await drive_for(web, seq, 0.4)  # a new command moves it again
+                  assert_moving(r.stm)
+              assert any(s["flag_stop"] == 0 for _, s in web.states)
+
+
+  # ======================================================================================
+  # (e) SAF-04: no clamping; int16 overflow is rejected and zero is written
+  # ======================================================================================
+
+
+  async def test_large_finite_values_are_sent_as_is_and_int16_overflow_is_rejected():
+      async with rig() as r:
+          async with web_connect(r.app) as web:
+              await become_driver_and_arm(web, r.app)
+              # 10 m/s on the web is 5.29 m/s on the wire: it fits the int16 frame, so it is not
+              # clamped by the app server or the robot.
+              since = len(web.states)
+              await web.send(t="cmd_vel", seq=1, vx=10.0, vy=-10.0, wz=10.0, src="kbd")
+              await web.wait_state(lambda s: s["last_cmd_seq"] == 1, since=since)
+              await wait_until(lambda: nonzero_entries(r.stm))
+              for entry in nonzero_entries(r.stm):
+                  assert entry[1] == pytest.approx(10.0 / FACTOR)
+                  assert entry[2] == pytest.approx(-10.0 / FACTOR)
+                  assert entry[3] == pytest.approx(10.0 / FACTOR)
+              assert r.writer.health().rejected_count == 0
+
+              # 70 m/s is 37.04 m/s on the wire, more than int16 millimetres can carry: rejected,
+              # not clamped, and zero takes the place of the previous command.
+              t0 = time.monotonic()
+              await web.send(t="cmd_vel", seq=2, vx=70.0, vy=0.0, wz=0.0, src="kbd")
+              latency = await zero_latency(r.stm, t0)
+              print("[e2e] SAF-04 int16 overflow -> zero: %.0f ms" % (latency * 1000))
+              assert latency <= FLAG_BOUND_S
+              await wait_until(lambda: r.writer.health().rejected_count == 1)
+              assert max(abs(e[1]) for e in list(r.stm.log)) < 6.0  # no clamped 32.767 anywhere
+
+              # A huge finite value (the factor division stays finite) is rejected the same way.
+              await web.send(t="cmd_vel", seq=3, vx=1e308, vy=0.0, wz=0.0, src="kbd")
+              await wait_until(lambda: r.writer.health().rejected_count == 2)
+              # NaN and Infinity literals never get past the app server.
+              await web.send_raw('{"t":"cmd_vel","seq":4,"vx":NaN,"vy":0,"wz":0}')
+              await web.send_raw('{"t":"cmd_vel","seq":5,"vx":Infinity,"vy":0,"wz":0}')
+              await asyncio.sleep(0.3)
+              assert r.writer.health().rejected_count == 2
+              _, state = web.states[-1]
+              # The NaN/Infinity commands (seq 4 and 5) never reached the robot. Seq 1 to 3 may show:
+              # a zero command carries the newest seq the app server saw.
+              assert state["last_cmd_seq"] < 4
+              assert is_zero(r.stm.log[-1])
+  ```
+
+  ### Phần C. Kiểm tra (Haiku chạy, dán kết quả thật vào báo cáo)
+
+  Thư mục `/home/vth/ws/mecanum_base`.
+
+  1. Test mới riêng lẻ, phải thấy `11 passed` và các dòng `[e2e]` (khoảng 30 giây):
+     `.venv/bin/pytest app/server/tests/test_e2e.py -s`
+     Số đo kỳ vọng (máy phát triển, tham khảo, KHÔNG phải điều kiện đạt): vòng lệnh p50 khoảng 30 ms, p95 khoảng 60 ms; ngắt operator, cắt link, disarm khoảng 5 đến 50 ms; watchdog app server và deadman robot (tính từ lệnh cuối) khoảng 280 đến 310 ms; SAF-05 khoảng 40 ms; vượt int16 khoảng 50 ms.
+  2. Toàn bộ test Python, chạy **ba lần liên tiếp**, mỗi lần phải kết thúc bằng đúng `239 passed` (robot 86, server 142, e2e 11; mỗi lần khoảng 55 giây). Số cũ là 201 (80 + 121), cộng 6 test robot, 21 test server, 11 test e2e:
+     `.venv/bin/pytest`
+     (lặp lại hai lần nữa). Một lần fail ngẫu nhiên là lỗi cần báo (ghi tên test, thông báo, số đo `[e2e]`), không được chạy lại cho tới khi qua rồi báo là qua.
+  3. Client, thư mục `app/client`:
+     - `npm test` phải kết thúc `Test Files  6 passed (6)` và `Tests  147 passed (147)` (cũ 146, thêm 1).
+     - `npx tsc --noEmit` không in gì, mã thoát 0.
+     - `npm run lint` không có lỗi hay cảnh báo.
+     - `npm run build` thành công, liệt kê 7 route (`/`, `/_not-found`, `/dynamics`, `/kinematics/forward`, `/kinematics/inverse`, `/lidar`, `/system`). (Cần mạng để tải font; nếu không có mạng, ghi lại, không coi là lỗi mã.) Build có thể làm đổi `app/client/next-env.d.ts` hoặc `.next/`: hai thứ này đã nằm trong `.gitignore`, bỏ qua.
+  4. Grep hệ số, chạy ở thư mục gốc, kết quả phải đúng như ghi:
+     - `grep -rn "1\.89" app/client/src` không in gì.
+     - `grep -rn --include=*.py "1\.89" app/server/app_server robot/robot_agent` chỉ in 3 dòng, cả ba trong `app/server/app_server/control.py` (dòng 1, 3, 15). `telemetry.py` KHÔNG chứa `1.89` (nó dùng hằng `CMD_VEL_DIVISOR`).
+     - `grep -rln "1\.89" app robot --include=*.py --include=*.ts --include=*.tsx --exclude-dir=node_modules --exclude-dir=.next` chỉ in: `app/server/app_server/control.py`, `app/server/tests/test_e2e.py`, `app/server/tests/test_server.py`, `robot/tests/test_robot.py`.
+  5. `git status --short` (chỉ đọc) phải liệt kê đúng 9 file ở danh sách trên (8 sửa và `app/server/tests/test_e2e.py` mới). File nào khác xuất hiện thì hoàn tác phần đó và báo.
+
+  ### Phần D. Báo cáo của Haiku
+
+  Trả: danh sách file đã chạm; đầu ra thật của 5 bước kiểm tra (đủ các dòng `[e2e]`, ba dòng `239 passed`, các số vitest); điểm nào lệch với "kỳ vọng"; hoặc `BLOCKED` kèm câu hỏi. Không commit.
+
+  ### Phần E. Việc của Sonnet (người đối chứng), không phải Haiku
+
+  1. Đối chứng code theo `git diff develop...HEAD` với cả ba file spec/plan/task; chạy lại Phần C. Xác nhận: không có `1.89` ngoài `control.py` và test; telemetry không còn NaN/Infinity trong JSON; hai vòng lặp có `try/except` có log và `except Exception` (không bắt `CancelledError`).
+  2. Kiểm tra trên trình duyệt thật (cổng 18190 đến 18199). Chạy từ thư mục gốc, ba tiến trình nền (tiền tố biến môi trường, không ghi vào `.env`; token chọn tùy ý, dài):
+     - Robot mô phỏng: `ROBOT_SIMULATE=true ROBOT_MOTION_ENABLED=true ROBOT_BIND_HOST=127.0.0.1 ROBOT_BIND_PORT=18190 ROBOT_LINK_TOKEN=<token> .venv/bin/python -m robot_agent` (với `PYTHONPATH=robot`).
+     - App server: `ROBOT_LINK_TOKEN=<token> OPERATOR_TOKEN=<mã> ROBOT_WS_URL=ws://127.0.0.1:18190/ws APP_BIND_HOST=127.0.0.1 APP_BIND_PORT=18191 APP_ALLOWED_ORIGINS=http://127.0.0.1:18192,http://localhost:18192 .venv/bin/python -m app_server.main` (với `PYTHONPATH=app/server`).
+     - Client (`app/client`): `NEXT_PUBLIC_APP_WS_URL=ws://127.0.0.1:18191/ws/operator npm run dev -- -p 18192 -H 127.0.0.1`. Mở `http://127.0.0.1:18192`.
+     Các việc cần xem: (a) nhập mã, arm (`R`), giữ `W`: vận tốc đo lên khoảng bằng lệnh, đơn vị web; trong DevTools tab Network, mục WS của `/ws/operator`, tìm `1.89` và `0.529` trong mọi frame: không thấy; (b) chuyển qua 6 trang bằng điều hướng, kết nối không rớt, phím vẫn lái; (c) thả phím, đổi tab, mất focus: lệnh về 0; `X` và `Esc` dừng và disarm; (d) đóng tab đang lái khi giữ phím: ở một tab khác (chỉ xem) tốc độ đo về 0 và hiện disarm; (e) kill -9 app server khi đang lái, rồi chạy lại nó: web tự nối lại, thanh trạng thái hiện disarm (phải arm lại), robot không tự chạy lại lệnh cũ (việc dừng trong 0,3 s đã do test `test_robot_deadman_...` chứng minh, trình duyệt không đo được); (f) mở bằng một origin không có trong `APP_ALLOWED_ORIGINS` (ví dụ đổi tên host) thì 403 và thanh trạng thái "Mất kết nối"; (g) `http://127.0.0.1:18191/docs`, `/redoc`, `/openapi.json` đều 404; (h) trang `/system` hiện độ trễ vòng lệnh và RTT; (i) trang `/lidar` vẽ scan; (j) không có lỗi đỏ trong Console. Tắt cả ba tiến trình khi xong; không chạy động cơ thật.
+  3. Ghi số đo vào khối bên dưới (thay các dấu `…`), rồi đặt trạng thái `PASS` nếu mọi mục đạt hoặc ghi rõ danh sách sửa.
+
+  ### Kết quả đo
+
+  _(Sonnet đã điền 2026-11-09: pytest `-s` chạy một lần sạch, có lần chạy thêm với tải CPU; trình duyệt là Chrome headless 157 thật, robot mô phỏng `ROBOT_SIMULATE=true ROBOT_MOTION_ENABLED=true` có ghi mọi lệnh xuống STM32 giả, app server thật, `next start`.)_
+
+  | Phép đo | Mốc | Kết quả pytest `-s` | Kết quả trình duyệt / ghi chú |
+  |---|---|---|---|
+  | Vòng lệnh `cmd_vel` → `last_cmd_seq` p95 (60 lệnh) | ≤ 150 ms | p50 29, p95 58, max 59 ms | 49 ms (1280 px) và 51 ms (390 px), 100 mẫu, trang `/system`. RTT robot hiện "—" (xem ghi chú dưới bảng) |
+  | Operator ngắt → 0 tại STM32 | ≤ 300 ms | 47, 48, 4 ms (trung vị 47) | Đóng tab đang giữ `W`: 10 ms; tab xem hiện disarm, vận tốc đo về 0 |
+  | Watchdog app server (lệnh cuối → 0) | ≤ 550 ms | 295, 303, 305 ms (trung vị 303; lần có tải 342 ms) | không đo được từ trình duyệt |
+  | Cắt link robot → 0 | ≤ 300 ms | 44, 50, 6 ms (trung vị 44) | Kill robot khi giữ `W`: thanh trạng thái "Robot: mất link", DISARM; robot mở lại, `W` vẫn giữ: không có lệnh nào chạy lại |
+  | Disarm → 0 | ≤ 300 ms | 46, 49, 2 ms (trung vị 46) | `X` 49 ms, `Esc` 43 ms, cả hai disarm |
+  | Deadman robot, bên gửi đứng im (lệnh cuối → 0) | ≤ 550 ms | 296, 293, 296 ms (trung vị 296) | không đo được từ trình duyệt |
+  | Bên gửi bị kill → 0 | ≤ 300 ms | 47, 44, 48 ms (trung vị 47) | kill -9 app server khi lái: 47 ms; app chạy lại, web tự nối lại, hiện DISARM, `W` vẫn giữ nhưng robot không chạy lại |
+  | SAF-05 cờ dừng / telemetry cũ → 0 | ≤ 500 ms | 45 / 37 ms | không đo được từ trình duyệt |
+  | SAF-04 vượt int16 → 0, không kẹp | ≤ 500 ms | 48 ms | không đo được từ trình duyệt (10 m/s đến robot đúng 5.29, kiểm bằng test) |
+  | Số test | 239 Python, 147 vitest | 239 (ba lần liên tiếp, đều qua) / 147 | tsc, eslint, build (7 route) qua |
+  | Mở web từ origin lạ | 403 | 403 (test) | `http://127.0.0.1:18193` (không có trong `APP_ALLOWED_ORIGINS`): "Mất kết nối", lỗi handshake trong Console, không nhận frame nào |
+
+  Ghi chú trình duyệt: thả phím 51 ms, mất focus 39 ms, tab ẩn 36 ms đều ra lệnh 0. Gõ 0.2 m/s: web thấy 0.200 (vận tốc đo 0.2003), robot mô phỏng nhận 0.10582 (= 0.2/hệ số). Qua 6 trang bằng điều hướng, phím vẫn lái ở cả 6 trang. 336 frame văn bản và 160 frame nhị phân nhận được: không có chuỗi `1.89` hay `0.529`, không có số nào gần 0.1058. `/docs`, `/redoc`, `/openapi.json` đều 404. Không có lỗi Console ngoài lỗi nối lại khi app server tắt. Header `Authorization` lặp hoặc có NUL: 401 hoặc đóng kết nối, không bao giờ 500. Hai điều chưa đạt yêu cầu (h) hoặc đáng ghi: `rtt_ms` luôn `null` trên robot thật của mô phỏng nên `/system` hiện RTT "—" (với `websockets 16.1.1`, `connection.latency` của link tới `RobotServer` giữ 0.0, còn máy chủ thử đơn giản thì có số); khi robot khởi động, bộ ghi báo một lỗi "stm is not running" (đếm lỗi ghi = 1) vì ghi trước khi nguồn STM chạy.
 
 ### T15 — Thử trên Jetson (cần người dùng)
 - Trạng thái: TODO · Plan: P5 · Phụ thuộc: T14, Jetson online
