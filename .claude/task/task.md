@@ -177,7 +177,7 @@ Trạng thái: `TODO → ORDERED → CODED → PASS → MERGED` hoặc `BLOCKED`
 ## P1 — Robot agent
 
 ### T02 — Sửa lớp thiết bị
-- Trạng thái: CODED · Plan: P1 · Phụ thuộc: T01
+- Trạng thái: MERGED · Plan: P1 · Phụ thuộc: T01
 - Spec: FIX-1, FIX-2, FIX-7, FIX-8, FIX-9
 - File: `robot/robot_agent/hardware.py`, `robot/robot_agent/drive.py` (chỉ phần tính độ tuổi của FIX-7), `robot/tests/test_robot.py`
 - Đạt khi: test bao phủ đọc không chờ đủ 128 byte, frame phụ được lưu, mất gói quanh 0° vẫn tách scan, `0.1/1.89` mã hóa thành 53 mm/s, độ tuổi dùng monotonic.
