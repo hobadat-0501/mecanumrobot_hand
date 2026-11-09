@@ -3,28 +3,46 @@ requires = ["setuptools>=75"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "robot-keyboard-sensors"
-version = "0.1.0"
-description = "Direct keyboard teleoperation and STM32, N10P, Astra-S device interfaces"
+name = "mecanum-base"
+version = "0.2.0.dev0"
+description = "Mecanum robot agent (Jetson) and app server for the web control system"
 requires-python = ">=3.10"
-dependencies = ["pyserial>=3.5"]
+dependencies = []
 
 [project.optional-dependencies]
-agent = ["websockets>=14,<18", "python-dotenv>=1,<2"]
-camera = ["numpy>=2.0", "primesense>=2.2.0.30.post5"]
-test = ["pytest>=8.0", "numpy>=2.0"]
+robot = [
+    "pyserial>=3.5,<4",
+    "websockets>=14,<17",
+    "python-dotenv>=1,<2",
+    "numpy>=2.0,<3",
+]
+server = [
+    "fastapi>=0.110,<1",
+    "uvicorn[standard]>=0.30,<1",
+    "websockets>=14,<17",
+    "python-dotenv>=1,<2",
+]
+camera = [
+    "numpy>=2.0,<3",
+    "primesense>=2.2.0.30.post5",
+]
+test = [
+    "pytest>=8,<10",
+    "pytest-asyncio>=0.23,<2",
+    "httpx>=0.27,<1",
+]
 
 [tool.setuptools]
-package-dir = {"" = "src"}
-py-modules = ["hardware", "teleop"]
+packages = ["robot_agent", "app_server"]
 
-[tool.setuptools.packages.find]
-where = ["src"]
-include = ["robot_agent*"]
+[tool.setuptools.package-dir]
+robot_agent = "robot/robot_agent"
+app_server = "app/server/app_server"
 
 [tool.pytest.ini_options]
-testpaths = ["tests/python/tests", "app/server/tests"]
-pythonpath = ["src", "scripts/python"]
+testpaths = ["robot/tests", "app/server/tests"]
+pythonpath = ["robot", "app/server"]
+asyncio_mode = "auto"
 addopts = "-q"
 
 [tool.ruff]

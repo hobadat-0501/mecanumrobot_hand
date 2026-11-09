@@ -1,3 +1,5 @@
+> **Ghi chú (2026-11-09):** Các số hình học trong tài liệu này (L + d = 0,30 m) là giả định cũ, đã bị thay bởi spec PHY-1 (`L = 0,32 m`, `d = 0,35 m`, `lever = (L + d)/2 = 0,335 m`). Các kết quả tính trong tài liệu chưa được tính lại theo thông số mới.
+
 # Chứng minh 4 động cơ MD36L P27 (24 V) đủ lực cho robot Mecanum 9,7 kg
 
 Tài liệu dựa trên mô hình Newton–Euler trong file *Động lực học robot mecanum* (slide 4–9).
