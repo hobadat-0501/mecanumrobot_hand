@@ -1,0 +1,41 @@
+# Operating-system and editor state
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.tmp
+*.bak
+*.swp
+.idea/
+.vscode/
+
+# Local secrets and overrides
+.env
+.env.*
+!.env.example
+/configs/local*.yaml
+/configs/local*.yml
+/configs/local*.json
+
+# Python environments, packaging and test output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.venv*/
+*.egg-info/
+build/
+dist/
+
+# Local device capture and logs
+*.log
+/captures/
+
+# Backup of the client repository from before the monorepo
+/.git-backups/
+
+# Web build output
+node_modules/
+.next/

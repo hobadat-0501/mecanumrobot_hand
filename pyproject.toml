@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "robot-keyboard-sensors"
+version = "0.1.0"
+description = "Direct keyboard teleoperation and STM32, N10P, Astra-S device interfaces"
+requires-python = ">=3.10"
+dependencies = ["pyserial>=3.5"]
+
+[project.optional-dependencies]
+agent = ["websockets>=14,<18", "python-dotenv>=1,<2"]
+camera = ["numpy>=2.0", "primesense>=2.2.0.30.post5"]
+test = ["pytest>=8.0", "numpy>=2.0"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = ["hardware", "teleop"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["robot_agent*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python/tests", "app/server/tests"]
+pythonpath = ["src", "scripts/python"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
