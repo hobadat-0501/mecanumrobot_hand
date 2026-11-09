@@ -18,17 +18,11 @@ export interface RunParams {
   vCruise: number;
   /** Tốc độ quay chạy (rad/s). Không chặn trên. */
   wzCruise: number;
-  /** Gia tốc tịnh tiến tối đa (m/s^2). Không chặn trên. */
-  accelLin: number;
-  /** Gia tốc góc tối đa (rad/s^2). Không chặn trên. */
-  accelAng: number;
 }
 
 export const DEFAULT_RUN_PARAMS: RunParams = {
   vCruise: 0.2,
   wzCruise: 1.0,
-  accelLin: 0.5,
-  accelAng: 1.5,
 };
 
 export type AbortReason = "stale" | "disarmed" | "key" | "timeout";
@@ -61,8 +55,6 @@ export function validateRunParams(p: RunParams): string | null {
   const entries: [string, number][] = [
     ["vCruise", p.vCruise],
     ["wzCruise", p.wzCruise],
-    ["accelLin", p.accelLin],
-    ["accelAng", p.accelAng],
   ];
   for (const [name, value] of entries) {
     if (!Number.isFinite(value) || value <= 0) {
@@ -213,8 +205,8 @@ export function trackStep(s: TrackState, input: TrackInput): TrackStep {
   // Tốc độ mong muốn; thu nhỏ vector tịnh tiến để giữ hướng.
   let vx = KP_LIN * error.ebx;
   let vy = KP_LIN * error.eby;
-  // Giới hạn phanh PHY-6: |v| <= sqrt(2*a*|e|), |wz| <= sqrt(2*alpha*|e_theta|).
-  const speedMax = Math.min(p.vCruise, Math.sqrt(2 * p.accelLin * error.dist));
+  // Chỉ giới hạn theo tốc độ chạy; tăng/giảm tốc do STM đảm nhiệm (PHY-6).
+  const speedMax = p.vCruise;
   const speed = Math.hypot(vx, vy);
   if (speed > speedMax) {
     const k = speedMax / speed;
@@ -222,30 +214,9 @@ export function trackStep(s: TrackState, input: TrackInput): TrackStep {
     vy *= k;
   }
   let wz = KP_ANG * error.etheta;
-  const wzMax = Math.min(
-    p.wzCruise,
-    Math.sqrt(2 * p.accelAng * Math.abs(error.etheta)),
-  );
-  if (Math.abs(wz) > wzMax) wz = Math.sign(wz) * wzMax;
+  if (Math.abs(wz) > p.wzCruise) wz = Math.sign(wz) * p.wzCruise;
 
-  // Giới hạn gia tốc: thu nhỏ vector thay đổi tịnh tiến để giữ hướng; wz giới hạn riêng.
-  let dvx = vx - s.prevCmd.vx;
-  let dvy = vy - s.prevCmd.vy;
-  const dv = Math.hypot(dvx, dvy);
-  const maxDv = p.accelLin * dt;
-  if (dv > maxDv) {
-    const k = maxDv / dv;
-    dvx *= k;
-    dvy *= k;
-  }
-  const maxDw = p.accelAng * dt;
-  const dw = Math.max(-maxDw, Math.min(maxDw, wz - s.prevCmd.wz));
-
-  const cmd: BodyVel = {
-    vx: s.prevCmd.vx + dvx,
-    vy: s.prevCmd.vy + dvy,
-    wz: s.prevCmd.wz + dw,
-  };
+  const cmd: BodyVel = { vx, vy, wz };
   return {
     cmd,
     state: { ...s, elapsed, okCycles, prevCmd: { ...cmd } },

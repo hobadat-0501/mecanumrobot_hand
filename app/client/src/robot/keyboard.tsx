@@ -9,6 +9,7 @@ import { decideKeyDown, isTypingTarget, motionActionOf } from "./control";
 import type { FocusLike } from "./control";
 import {
   emergencyStop,
+  cancelRun,
   haltAll,
   pressMotion,
   releaseKeys,
@@ -30,6 +31,9 @@ export function KeyboardController(): null {
       if (action.kind === "motion") {
         event.preventDefault(); // không cuộn trang bằng phím mũi tên
         pressMotion(action.code);
+      } else if (action.kind === "cancel") {
+        event.preventDefault(); // không kích hoạt nút đang focus
+        if (!event.repeat) cancelRun();
       } else if (action.kind === "arm") {
         if (!event.repeat) setArmed(true);
       } else {
@@ -38,6 +42,7 @@ export function KeyboardController(): null {
     };
     // Nhả phím luôn được xử lý, kể cả khi focus đã chuyển vào ô nhập, để không kẹt phím.
     const onKeyUp = (event: KeyboardEvent) => {
+      if (event.code === "Space") event.preventDefault();
       if (motionActionOf(event.code) !== null) releaseMotion(event.code);
     };
     const onFocusIn = (event: FocusEvent) => {
