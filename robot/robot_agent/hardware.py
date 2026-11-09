@@ -52,7 +52,7 @@ def encode_stm32_velocity_command(
         raise ValueError("STM32 command mode must be an unsigned byte")
     if not isinstance(reserved, int) or not 0 <= reserved <= 255:
         raise ValueError("STM32 reserved command byte must be an unsigned byte")
-    quantized = tuple(int(float(value) * 1000.0) for value in values)
+    quantized = tuple(int(round(float(value) * 1000.0)) for value in values)
     if not all(-32768 <= value <= 32767 for value in quantized):
         raise ValueError("STM32 velocity command exceeds signed 16-bit millimetre range")
     frame = bytearray((STM32_FRAME_HEADER, mode, reserved))
@@ -95,13 +95,13 @@ class Stm32FrameDecoder:
     def _signed_i16(data: bytes, offset: int) -> int:
         return int(struct.unpack_from(">h", data, offset)[0])
 
-    def feed(self, data: bytes, timestamp_ns: int) -> tuple[Stm32Telemetry, ...]:
+    def feed(self, data: bytes, timestamp_ns: int) -> tuple[Stm32Telemetry | Stm32AuxTelemetry, ...]:
         if not isinstance(data, (bytes, bytearray, memoryview)):
             raise TypeError("STM32 serial data must be bytes-like")
         if timestamp_ns < 0:
             raise ValueError("STM32 telemetry timestamp must be nonnegative")
         self._buffer.extend(data)
-        decoded: list[Stm32Telemetry] = []
+        decoded: list[Stm32Telemetry | Stm32AuxTelemetry] = []
         while True:
             candidates = [index for index in (self._buffer.find(bytes((STM32_FRAME_HEADER,))), self._buffer.find(bytes((STM32_AUX_HEADER,)))) if index >= 0]
             if not candidates:
@@ -116,6 +116,17 @@ class Stm32FrameDecoder:
                 packet = bytes(self._buffer[:STM32_AUX_SIZE])
                 if packet[-1] == STM32_AUX_TAIL and packet[-2] == stm32_xor_checksum(packet[:6]):
                     del self._buffer[:STM32_AUX_SIZE]
+                    # UNVERIFIED layout (spec A-4): [1:3] charging mA, [3] red,
+                    # [4] charging, [5] set_state. Verify on the real robot in T15.
+                    decoded.append(
+                        Stm32AuxTelemetry(
+                            t_ns=timestamp_ns,
+                            charging_current_a=int.from_bytes(packet[1:3], "big") / 1000.0,
+                            red=packet[3],
+                            charging=bool(packet[4]),
+                            charge_set_state=packet[5],
+                        )
+                    )
                     continue
                 del self._buffer[0]
                 continue
@@ -216,7 +227,7 @@ class Stm32SerialSource:
         frame = encode_stm32_velocity_command(vx_mps, vy_mps, wz_radps, mode=self.mode)
         with self._write_lock:
             self._serial.write(frame)
-        self.last_command = (utc_ns(), float(vx_mps), float(vy_mps), float(wz_radps))
+        self.last_command = (monotonic_ns(), float(vx_mps), float(vy_mps), float(wz_radps))
 
     def stop(self) -> None:
         if self._serial is not None and self._serial.is_open:
@@ -232,17 +243,26 @@ class Stm32SerialSource:
         self._serial = None
         self._thread = None
 
+    def _read_once(self) -> None:
+        # Read what is already buffered, but ask for at least 1 byte so an idle
+        # port still blocks up to the serial timeout (no busy loop) and a busy
+        # port never waits for a fixed 128-byte block.
+        waiting = int(getattr(self._serial, "in_waiting", 0) or 0)
+        payload = self._serial.read(max(1, min(waiting, 4096)))
+        if not payload:
+            return
+        timestamp = monotonic_ns()
+        for frame in self._decoder.feed(payload, timestamp):
+            with self._lock:
+                if isinstance(frame, Stm32AuxTelemetry):
+                    self._latest_aux = frame
+                else:
+                    self._latest = frame
+
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                payload = self._serial.read(128)
-                if not payload:
-                    continue
-                timestamp = utc_ns()
-                frames = self._decoder.feed(payload, timestamp)
-                if frames:
-                    with self._lock:
-                        self._latest = frames[-1]
+                self._read_once()
             except Exception:
                 self.errors += 1
                 if self._stop.wait(0.05):
@@ -365,6 +385,11 @@ class N10PDecoder:
         return tuple(points)
 
 
+def lidar_revolution_wrapped(previous_deg: float | None, current_deg: float) -> bool:
+    """True when the angle fell by more than 180 degrees (new revolution, even after packet loss)."""
+    return previous_deg is not None and previous_deg - current_deg > 180.0
+
+
 class N10PSerialSource:
     def __init__(
         self,
@@ -385,6 +410,8 @@ class N10PSerialSource:
         self._latest: LidarScan | None = None
         self._decoder = N10PDecoder(self.protocol_profile)
         self._scan_times = deque(maxlen=24)
+        self._last_angle_deg: float | None = None
+        self._points: list[LidarPoint] = []
         self.error: Exception | None = None
 
     @property
@@ -408,6 +435,8 @@ class N10PSerialSource:
         self._stop.clear()
         self._decoder = N10PDecoder(self.protocol_profile)
         self._latest = None
+        self._last_angle_deg = None
+        self._points = []
         self.error = None
         with self._lock:
             self._scan_times.clear()
@@ -457,26 +486,26 @@ class N10PSerialSource:
             self.error = error
             self._stop.set()
 
+    def _accept_point(self, point: LidarPoint, timestamp_ns: int) -> None:
+        angle = math.degrees(point.angle_rad)
+        if lidar_revolution_wrapped(self._last_angle_deg, angle) and self._points:
+            with self._lock:
+                self._latest = LidarScan(timestamp_ns, tuple(self._points))
+                self._scan_times.append(time.monotonic())
+            self._points = []
+        self._points.append(point)
+        self._last_angle_deg = angle
+
     def _run(self) -> None:
-        last_angle: float | None = None
-        points: list[LidarPoint] = []
         while not self._stop.is_set():
             waiting = int(getattr(self._serial, "in_waiting", 0) or 0)
             payload = self._serial.read(max(256, min(waiting, 4096)))
             if not payload:
                 continue
-            timestamp = utc_ns()
+            timestamp = monotonic_ns()
             for decoded in self._decoder.feed_all(payload, timestamp):
                 for point in decoded:
-                    angle = math.degrees(point.angle_rad)
-                    wrapped = last_angle is not None and last_angle > 355.0 and angle < 5.0
-                    if wrapped and points:
-                        with self._lock:
-                            self._latest = LidarScan(timestamp, tuple(points))
-                            self._scan_times.append(time.monotonic())
-                        points = []
-                    points.append(point)
-                    last_angle = angle
+                    self._accept_point(point, timestamp)
 
 
 @dataclass(frozen=True)

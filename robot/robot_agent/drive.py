@@ -60,12 +60,12 @@ class KeyboardDrive:
                 self._command = ZERO
                 self._deadline = 0.0
 
-    def tick(self, *, now: float | None = None, wall_ns: int | None = None) -> tuple[float, float, float]:
+    def tick(self, *, now: float | None = None, now_ns: int | None = None) -> tuple[float, float, float]:
         now = time.monotonic() if now is None else now
-        wall_ns = time.time_ns() if wall_ns is None else wall_ns
+        now_ns = time.monotonic_ns() if now_ns is None else now_ns
         with self._lock:
             sample = self.source.latest
-            age_s = (wall_ns - sample.t_ns) / 1e9 if sample is not None else math.inf
+            age_s = (now_ns - sample.t_ns) / 1e9 if sample is not None else math.inf
             fresh = 0 <= age_s <= self.telemetry_timeout
             if not self.armed or now >= self._deadline or not fresh or sample.flag_stop:
                 # Discard the command so recovered telemetry cannot restart old motion.
