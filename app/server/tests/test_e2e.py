@@ -351,7 +351,7 @@ async def test_units_web_0_189_is_robot_0_1_and_the_web_never_sees_wire_values()
                 for path, key, number in numbers_below(json.loads(text)):
                     if key is not None:
                         assert not any(w in key.lower() for w in ("wire", "divisor", "factor", "scale"))
-                    elif path not in (("pose",), ("link",)):  # pose integrates, rtt_ms is a time
+                    elif path not in (("pose",), ("link",), ("link", "rtt_ms")):  # pose integrates, rtt_ms is a time
                         assert not any(math.isclose(number, f, rel_tol=1e-6) for f in forbidden), (
                             path,
                             number,
