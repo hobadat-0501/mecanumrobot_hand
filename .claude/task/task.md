@@ -1154,11 +1154,692 @@ Trạng thái: `TODO → ORDERED → CODED → PASS → MERGED` hoặc `BLOCKED`
 ## P2 — App server
 
 ### T05 — Lõi điều khiển
-- Trạng thái: TODO · Plan: P2 · Phụ thuộc: T01
+- Trạng thái: MERGED · Plan: P2 · Phụ thuộc: T01
 - Spec: FR-03, SAF-01, SAF-02, SAF-04, SAF-07, PROTO-1
 - File: `app/server/app_server/{config,control}.py`, `app/server/tests/test_server.py`
 - Đạt khi: test bao phủ disarm mặc định, chia hệ số cả ba thành phần ở một hàm, không kẹp tốc độ, loại giá trị không hữu hạn, chỉ một operator, sai token chỉ được xem, Origin không hợp lệ bị từ chối.
-- Work order: _(Sonnet điền)_
+- Work order:
+
+  **Quy tắc cao nhất, theo thứ tự:** chỉ sửa đúng 3 file liệt kê dưới đây. Thiếu thông tin hoặc có mâu thuẫn thì dừng và trả `BLOCKED` kèm câu hỏi. Không chạy `git commit` (và không chạy lệnh git nào làm thay đổi repo). Không thiết kế thêm: chép nguyên văn nội dung file.
+
+  File được sửa (thư mục làm việc là gốc worktree):
+  1. `app/server/app_server/config.py` (tạo mới)
+  2. `app/server/app_server/control.py` (tạo mới)
+  3. `app/server/tests/test_server.py` (thay toàn bộ nội dung)
+
+  Không sửa `pyproject.toml`, `.env.example`, `__init__.py`. `python-dotenv` đã có trong venv.
+
+  Thiết kế (đã chốt, không đổi): `CMD_VEL_DIVISOR = 1.89` và hàm `to_wire_units` là nơi duy nhất chia hệ số; không có giới hạn hay kẹp tốc độ; hệ số không đọc từ env; token rỗng thì `load_settings` ném `ConfigError`; phiên bắt đầu ở disarm; một driver tại một thời điểm (hello thứ hai bị từ chối), viewer chỉ xem; so token bằng `hmac.compare_digest`; `handle_cmd_vel` ném `ValueError` khi dữ liệu sai, trả `None` khi không chuyển tiếp, và trả dict chỉ có `seq, vx, vy, wz` theo đơn vị wire; `watchdog_tripped()` trả `True` đúng một lần sau 250 ms (đồng hồ monotonic, tiêm được); `snapshot()` chỉ chứa đơn vị web. Quy ước cho T06: `arm(..., False)` được chấp nhận, `disconnect()` trả `True`, `watchdog_tripped()` trả `True` đều nghĩa là T06 phải gửi `cmd_vel` 0 xuống robot.
+
+  Các khối code dưới đây thụt vào 2 dấu cách vì nằm trong danh sách Markdown: **bỏ đúng 2 dấu cách đầu mỗi dòng** khi ghi ra file (file Python bắt đầu ở cột 0).
+
+  **File 1: `app/server/app_server/config.py`** (chép nguyên văn)
+
+  ```python
+  """App server settings, read once from the environment (and `.env` at the repo root)."""
+
+  from __future__ import annotations
+
+  import os
+  from dataclasses import dataclass
+  from pathlib import Path
+  from typing import Mapping, Optional, Tuple
+
+  from dotenv import load_dotenv
+
+  REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+  class ConfigError(ValueError):
+      """Raised when the settings are unusable; the server must not start."""
+
+
+  @dataclass(frozen=True)
+  class Settings:
+      robot_ws_url: str
+      robot_link_token: str
+      operator_token: str
+      bind_host: str
+      bind_port: int
+      allowed_origins: Tuple[str, ...]
+
+
+  def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
+      """Build Settings. With env=None, load `.env` (without overriding) and use os.environ."""
+      if env is None:
+          load_dotenv(REPO_ROOT / ".env", override=False)
+          env = os.environ
+
+      robot_link_token = env.get("ROBOT_LINK_TOKEN", "").strip()
+      operator_token = env.get("OPERATOR_TOKEN", "").strip()
+      if not robot_link_token:
+          raise ConfigError("ROBOT_LINK_TOKEN must not be empty")
+      if not operator_token:
+          raise ConfigError("OPERATOR_TOKEN must not be empty")
+
+      try:
+          bind_port = int(env.get("APP_BIND_PORT", "8000"))
+      except ValueError as exc:
+          raise ConfigError("APP_BIND_PORT must be an integer") from exc
+      if not 1 <= bind_port <= 65535:
+          raise ConfigError("APP_BIND_PORT must be in 1..65535")
+
+      origins = tuple(
+          o.strip()
+          for o in env.get("APP_ALLOWED_ORIGINS", "http://100.119.83.63:3000").split(",")
+          if o.strip()
+      )
+      return Settings(
+          robot_ws_url=env.get("ROBOT_WS_URL", "ws://100.69.39.18:8765/ws").strip(),
+          robot_link_token=robot_link_token,
+          operator_token=operator_token,
+          bind_host=env.get("APP_BIND_HOST", "100.119.83.63").strip(),
+          bind_port=bind_port,
+          allowed_origins=origins,
+      )
+  ```
+
+  **File 2: `app/server/app_server/control.py`** (chép nguyên văn)
+
+  ```python
+  """Control core: arm state, driving rights, cmd_vel validation, 1.89 division, watchdog.
+
+  The ONLY place the 1.89 factor is applied to commands is `to_wire_units` (SAF-01).
+  No speed limit or clamp exists here (SAF-04).
+  """
+
+  from __future__ import annotations
+
+  import hmac
+  import math
+  import time
+  from typing import Any, Callable, Dict, Iterable, Optional, Tuple
+
+  # Telemetry (T06) imports this same constant to multiply velocities back.
+  CMD_VEL_DIVISOR = 1.89
+  WATCHDOG_S = 0.25
+
+  Vec3 = Tuple[float, float, float]
+
+
+  def to_wire_units(vx: float, vy: float, wz: float) -> Vec3:
+      """Web units -> wire units. The single place that divides by CMD_VEL_DIVISOR."""
+      return (vx / CMD_VEL_DIVISOR, vy / CMD_VEL_DIVISOR, wz / CMD_VEL_DIVISOR)
+
+
+  def token_matches(supplied: Any, expected: str) -> bool:
+      """Constant-time token compare. Empty expected or non-str supplied never matches."""
+      if not isinstance(supplied, str) or not expected:
+          return False
+      return hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8"))
+
+
+  def origin_allowed(origin: Any, allowed: Iterable[str]) -> bool:
+      """Exact match of the Origin header against the allow-list."""
+      return isinstance(origin, str) and origin in tuple(allowed)
+
+
+  def _finite_number(value: Any) -> bool:
+      return (
+          isinstance(value, (int, float))
+          and not isinstance(value, bool)
+          and math.isfinite(value)
+      )
+
+
+  def validate_cmd_vel(msg: Any) -> Tuple[int, float, float, float]:
+      """Return (seq, vx, vy, wz) from a cmd_vel message or raise ValueError."""
+      if not isinstance(msg, dict):
+          raise ValueError("cmd_vel must be an object")
+      seq = msg.get("seq")
+      if isinstance(seq, bool) or not isinstance(seq, int) or seq < 0:
+          raise ValueError("seq must be a non-negative integer")
+      for key in ("vx", "vy", "wz"):
+          if not _finite_number(msg.get(key)):
+              raise ValueError(f"{key} must be a finite number")
+      return seq, float(msg["vx"]), float(msg["vy"]), float(msg["wz"])
+
+
+  class ControlSession:
+      """Arm state, single driving operator, last accepted command and watchdog.
+
+      Return conventions for T06:
+      - methods returning bool: True means accepted.
+      - `arm(..., False)` accepted, `disconnect(...)` returning True, and `watchdog_tripped()`
+        returning True all mean T06 must send a zero cmd_vel to the robot.
+      """
+
+      def __init__(
+          self,
+          operator_token: str,
+          allowed_origins: Iterable[str],
+          clock: Callable[[], float] = time.monotonic,
+      ) -> None:
+          self._token = operator_token
+          self._origins = tuple(allowed_origins)
+          self._clock = clock
+          self._armed = False  # SAF-02
+          self._clients: set = set()
+          self._driver: Optional[str] = None
+          self._last_cmd_at: Optional[float] = None
+          self._cmd_web: Vec3 = (0.0, 0.0, 0.0)
+          self._last_seq: Optional[int] = None
+
+      @property
+      def armed(self) -> bool:
+          return self._armed
+
+      @property
+      def driver(self) -> Optional[str]:
+          return self._driver
+
+      def connect(self, client_id: str, origin: Any) -> bool:
+          """Register a client as a viewer; False (not registered) if the Origin is rejected."""
+          if not origin_allowed(origin, self._origins):
+              return False
+          self._clients.add(client_id)
+          return True
+
+      def role(self, client_id: str) -> Optional[str]:
+          if client_id not in self._clients:
+              return None
+          return "driver" if client_id == self._driver else "viewer"
+
+      def hello(self, client_id: str, token: Any) -> bool:
+          """Claim driving rights. False on bad token, unknown client, or another driver holding."""
+          if client_id not in self._clients or not token_matches(token, self._token):
+              return False
+          if self._driver is not None and self._driver != client_id:
+              return False
+          self._driver = client_id
+          return True
+
+      def disconnect(self, client_id: str) -> bool:
+          """Remove a client. If it was the driver: disarm, clear command, return True (emit zero)."""
+          self._clients.discard(client_id)
+          if client_id != self._driver:
+              return False
+          self._driver = None
+          self._disarm()
+          return True
+
+      def arm(self, client_id: str, on: Any) -> bool:
+          """Only the driver may arm/disarm. `on` must be a bool."""
+          if client_id != self._driver or not isinstance(on, bool):
+              return False
+          if on:
+              self._armed = True
+              self._last_cmd_at = None
+          else:
+              self._disarm()
+          return True
+
+      def _disarm(self) -> None:
+          self._armed = False
+          self._last_cmd_at = None
+          self._cmd_web = (0.0, 0.0, 0.0)
+
+      def handle_cmd_vel(self, client_id: str, msg: Any) -> Optional[Dict[str, Any]]:
+          """Validate and convert a cmd_vel.
+
+          Raises ValueError if invalid. Returns None when not forwarded (disarmed or not the
+          driver). Otherwise returns {"seq","vx","vy","wz"} in wire units (FR-03).
+          """
+          seq, vx, vy, wz = validate_cmd_vel(msg)
+          if not self._armed or client_id != self._driver:
+              return None
+          self._last_cmd_at = self._clock()
+          self._cmd_web = (vx, vy, wz)
+          self._last_seq = seq
+          wvx, wvy, wwz = to_wire_units(vx, vy, wz)
+          return {"seq": seq, "vx": wvx, "vy": wvy, "wz": wwz}
+
+      def watchdog_tripped(self) -> bool:
+          """True once when 250 ms passed since the last accepted command (T06 emits zero)."""
+          if self._last_cmd_at is None:
+              return False
+          if self._clock() - self._last_cmd_at < WATCHDOG_S:
+              return False
+          self._last_cmd_at = None
+          self._cmd_web = (0.0, 0.0, 0.0)
+          return True
+
+      def snapshot(self) -> Dict[str, Any]:
+          """Session part of the state message; web units only, never wire values or the factor."""
+          vx, vy, wz = self._cmd_web
+          return {
+              "armed": self._armed,
+              "has_driver": self._driver is not None,
+              "cmd": {"vx": vx, "vy": vy, "wz": wz},
+              "last_cmd_seq": self._last_seq,
+          }
+  ```
+
+  **File 3: `app/server/tests/test_server.py`** (chép nguyên văn, thay file cũ)
+
+  ```python
+  import math
+
+  import pytest
+
+  from app_server import control
+  from app_server.config import ConfigError, load_settings
+  from app_server.control import (
+      CMD_VEL_DIVISOR,
+      ControlSession,
+      origin_allowed,
+      to_wire_units,
+      token_matches,
+      validate_cmd_vel,
+  )
+
+  ORIGIN = "http://100.119.83.63:3000"
+
+
+  class FakeClock:
+      def __init__(self):
+          self.t = 100.0
+
+      def __call__(self):
+          return self.t
+
+
+  def make_session(clock=None):
+      return ControlSession("secret", [ORIGIN], clock or FakeClock())
+
+
+  def driver_session(clock=None):
+      s = make_session(clock)
+      assert s.connect("a", ORIGIN)
+      assert s.hello("a", "secret")
+      return s
+
+
+  def cmd(seq=1, vx=0.0, vy=0.0, wz=0.0):
+      return {"type": "cmd_vel", "seq": seq, "vx": vx, "vy": vy, "wz": wz, "src": "kbd"}
+
+
+  def test_package_imports():
+      import app_server
+
+      assert app_server is not None
+
+
+  # ---- config ----
+
+  BASE_ENV = {"ROBOT_LINK_TOKEN": "link", "OPERATOR_TOKEN": "op"}
+
+
+  def test_config_defaults_and_frozen():
+      s = load_settings(dict(BASE_ENV))
+      assert s.robot_ws_url == "ws://100.69.39.18:8765/ws"
+      assert s.bind_host == "100.119.83.63"
+      assert s.bind_port == 8000
+      assert s.allowed_origins == (ORIGIN,)
+      with pytest.raises(Exception):
+          s.bind_port = 1
+
+
+  def test_config_parses_origins_and_port():
+      env = dict(BASE_ENV, APP_ALLOWED_ORIGINS=" http://a:1 , http://b:2 ,", APP_BIND_PORT="9000")
+      s = load_settings(env)
+      assert s.allowed_origins == ("http://a:1", "http://b:2")
+      assert s.bind_port == 9000
+
+
+  @pytest.mark.parametrize("missing", ["ROBOT_LINK_TOKEN", "OPERATOR_TOKEN"])
+  @pytest.mark.parametrize("value", [None, "", "   "])
+  def test_config_empty_token_refuses_to_start(missing, value):
+      env = dict(BASE_ENV)
+      if value is None:
+          del env[missing]
+      else:
+          env[missing] = value
+      with pytest.raises(ConfigError):
+          load_settings(env)
+
+
+  def test_config_bad_port():
+      with pytest.raises(ConfigError):
+          load_settings(dict(BASE_ENV, APP_BIND_PORT="abc"))
+
+
+  def test_config_has_no_divisor_setting():
+      s = load_settings(dict(BASE_ENV, CMD_VEL_DIVISOR="5"))
+      assert not any("divisor" in f.lower() for f in s.__dataclass_fields__)
+      assert CMD_VEL_DIVISOR == 1.89
+
+
+  # ---- disarm by default, arm rights ----
+
+  def test_starts_disarmed():
+      s = make_session()
+      assert s.armed is False
+      assert s.snapshot()["armed"] is False
+
+
+  def test_disarmed_driver_command_not_forwarded():
+      s = driver_session()
+      assert s.handle_cmd_vel("a", cmd(vx=1.0)) is None
+
+
+  def test_arm_then_forward():
+      s = driver_session()
+      assert s.arm("a", True) is True
+      assert s.armed is True
+      assert s.handle_cmd_vel("a", cmd(vx=1.0)) is not None
+
+
+  def test_disarm_stops_forwarding():
+      s = driver_session()
+      s.arm("a", True)
+      assert s.arm("a", False) is True
+      assert s.armed is False
+      assert s.handle_cmd_vel("a", cmd(vx=1.0)) is None
+      assert s.snapshot()["cmd"] == {"vx": 0.0, "vy": 0.0, "wz": 0.0}
+
+
+  def test_arm_requires_bool_and_driver():
+      s = driver_session()
+      assert s.arm("a", "yes") is False
+      assert s.armed is False
+      assert s.connect("v", ORIGIN)
+      assert s.arm("v", True) is False
+      assert s.armed is False
+
+
+  # ---- 1.89 division, single function ----
+
+  def test_divisor_constant():
+      assert CMD_VEL_DIVISOR == 1.89
+
+
+  def test_to_wire_units_divides_all_three():
+      vx, vy, wz = to_wire_units(1.89, -3.78, 0.189)
+      assert vx == pytest.approx(1.0)
+      assert vy == pytest.approx(-2.0)
+      assert wz == pytest.approx(0.1)
+
+
+  def test_to_wire_units_known_vector():
+      vx, vy, wz = to_wire_units(0.1, 0.1, 0.1)
+      for v in (vx, vy, wz):
+          assert v == pytest.approx(0.1 / 1.89)
+      assert round(vx * 1000) == 53  # 52.91 mm/s
+
+
+  def test_handle_cmd_vel_output_is_wire_only():
+      s = driver_session()
+      s.arm("a", True)
+      out = s.handle_cmd_vel("a", cmd(seq=7, vx=1.89, vy=3.78, wz=-0.945))
+      assert set(out) == {"seq", "vx", "vy", "wz"}
+      assert out["seq"] == 7
+      assert out["vx"] == pytest.approx(1.0)
+      assert out["vy"] == pytest.approx(2.0)
+      assert out["wz"] == pytest.approx(-0.5)
+
+
+  def test_snapshot_web_units_without_factor_or_wire_values():
+      s = driver_session()
+      s.arm("a", True)
+      s.handle_cmd_vel("a", cmd(seq=3, vx=1.89, vy=0.0, wz=0.0))
+      snap = s.snapshot()
+      assert snap["cmd"] == {"vx": 1.89, "vy": 0.0, "wz": 0.0}
+      assert snap["last_cmd_seq"] == 3
+      text = repr(snap)
+      assert "1.89" in text  # the web-unit value itself
+      assert "divisor" not in text.lower()
+      assert repr(1.0) not in repr(snap["cmd"])  # wire value is absent
+
+
+  def test_divisor_only_used_in_to_wire_units():
+      import inspect
+
+      src = inspect.getsource(control)
+      body = inspect.getsource(control.to_wire_units)
+      assert src.count("/ CMD_VEL_DIVISOR") == 3
+      assert body.count("/ CMD_VEL_DIVISOR") == 3
+
+
+  # ---- no clamping (SAF-04) ----
+
+  @pytest.mark.parametrize("big", [5.0, 100.0, -250.0, 1e6])
+  def test_no_speed_limit(big):
+      s = driver_session()
+      s.arm("a", True)
+      out = s.handle_cmd_vel("a", cmd(vx=big, vy=-big, wz=big))
+      assert out["vx"] == pytest.approx(big / 1.89)
+      assert out["vy"] == pytest.approx(-big / 1.89)
+      assert out["wz"] == pytest.approx(big / 1.89)
+      assert s.snapshot()["cmd"]["vx"] == big
+
+
+  # ---- validation ----
+
+  @pytest.mark.parametrize("bad", [math.nan, math.inf, -math.inf])
+  @pytest.mark.parametrize("field", ["vx", "vy", "wz"])
+  def test_non_finite_rejected(bad, field):
+      s = driver_session()
+      s.arm("a", True)
+      m = cmd()
+      m[field] = bad
+      with pytest.raises(ValueError):
+          s.handle_cmd_vel("a", m)
+      assert s.snapshot()["last_cmd_seq"] is None
+
+
+  @pytest.mark.parametrize("bad", ["1", None, True, [1], {"a": 1}])
+  def test_wrong_types_rejected(bad):
+      for field in ("vx", "vy", "wz"):
+          m = cmd()
+          m[field] = bad
+          with pytest.raises(ValueError):
+              validate_cmd_vel(m)
+
+
+  @pytest.mark.parametrize("seq", [None, "1", 1.5, True, -1])
+  def test_bad_seq_rejected(seq):
+      with pytest.raises(ValueError):
+          validate_cmd_vel(cmd(seq=seq))
+
+
+  def test_missing_field_and_non_dict_rejected():
+      with pytest.raises(ValueError):
+          validate_cmd_vel({"seq": 1, "vx": 0.0, "vy": 0.0})
+      with pytest.raises(ValueError):
+          validate_cmd_vel([1, 2, 3])
+
+
+  def test_int_values_accepted():
+      assert validate_cmd_vel(cmd(seq=1, vx=1, vy=0, wz=0)) == (1, 1.0, 0.0, 0.0)
+
+
+  # ---- single operator, viewers read-only ----
+
+  def test_wrong_token_is_viewer_only():
+      s = make_session()
+      s.connect("a", ORIGIN)
+      assert s.hello("a", "wrong") is False
+      assert s.hello("a", None) is False
+      assert s.role("a") == "viewer"
+      assert s.arm("a", True) is False
+      assert s.armed is False
+
+
+  def test_only_one_driver():
+      s = driver_session()
+      s.connect("b", ORIGIN)
+      assert s.hello("b", "secret") is False
+      assert s.role("a") == "driver"
+      assert s.role("b") == "viewer"
+      s.arm("a", True)
+      assert s.handle_cmd_vel("b", cmd(vx=1.0)) is None
+      assert s.handle_cmd_vel("a", cmd(vx=1.0)) is not None
+
+
+  def test_driver_hello_again_ok():
+      s = driver_session()
+      assert s.hello("a", "secret") is True
+
+
+  def test_driver_disconnect_disarms_and_signals_zero():
+      s = driver_session()
+      s.arm("a", True)
+      s.handle_cmd_vel("a", cmd(vx=1.0))
+      assert s.disconnect("a") is True
+      assert s.armed is False
+      assert s.driver is None
+      assert s.snapshot()["cmd"] == {"vx": 0.0, "vy": 0.0, "wz": 0.0}
+      s.connect("b", ORIGIN)
+      assert s.hello("b", "secret") is True
+      assert s.armed is False  # new driver still starts disarmed
+
+
+  def test_viewer_disconnect_keeps_state():
+      s = driver_session()
+      s.arm("a", True)
+      s.connect("v", ORIGIN)
+      assert s.disconnect("v") is False
+      assert s.armed is True
+      assert s.role("v") is None
+
+
+  def test_unknown_client_cannot_hello():
+      s = make_session()
+      assert s.hello("ghost", "secret") is False
+
+
+  # ---- token and origin ----
+
+  def test_token_matches():
+      assert token_matches("secret", "secret") is True
+      assert token_matches("secreT", "secret") is False
+      assert token_matches("", "") is False
+      assert token_matches(None, "secret") is False
+      assert token_matches(123, "secret") is False
+      assert token_matches("sécret", "secret") is False
+
+
+  def test_token_compare_is_constant_time():
+      import inspect
+
+      assert "compare_digest" in inspect.getsource(control.token_matches)
+
+
+  def test_origin_allowed():
+      assert origin_allowed(ORIGIN, [ORIGIN]) is True
+      assert origin_allowed("http://evil.example", [ORIGIN]) is False
+      assert origin_allowed(None, [ORIGIN]) is False
+      assert origin_allowed("", [ORIGIN]) is False
+      assert origin_allowed(ORIGIN, []) is False
+
+
+  def test_bad_origin_rejected_on_connect():
+      s = make_session()
+      assert s.connect("x", "http://evil.example") is False
+      assert s.connect("y", None) is False
+      assert s.role("x") is None
+      assert s.hello("x", "secret") is False
+
+
+  # ---- watchdog (SAF-03b) ----
+
+  def test_watchdog_trips_at_250ms_once():
+      clock = FakeClock()
+      s = driver_session(clock)
+      s.arm("a", True)
+      assert s.watchdog_tripped() is False  # nothing received yet
+      s.handle_cmd_vel("a", cmd(vx=1.0))
+      clock.t += 0.249
+      assert s.watchdog_tripped() is False
+      clock.t += 0.001
+      assert s.watchdog_tripped() is True
+      assert s.watchdog_tripped() is False
+      assert s.snapshot()["cmd"] == {"vx": 0.0, "vy": 0.0, "wz": 0.0}
+      assert s.armed is True
+
+
+  def test_watchdog_reset_by_new_command():
+      clock = FakeClock()
+      s = driver_session(clock)
+      s.arm("a", True)
+      s.handle_cmd_vel("a", cmd(seq=1, vx=1.0))
+      clock.t += 0.2
+      s.handle_cmd_vel("a", cmd(seq=2, vx=1.0))
+      clock.t += 0.2
+      assert s.watchdog_tripped() is False
+      clock.t += 0.06
+      assert s.watchdog_tripped() is True
+
+
+  def test_rejected_commands_do_not_feed_watchdog():
+      clock = FakeClock()
+      s = driver_session(clock)
+      s.arm("a", True)
+      s.handle_cmd_vel("a", cmd(vx=1.0))
+      s.connect("b", ORIGIN)
+      clock.t += 0.2
+      assert s.handle_cmd_vel("b", cmd(seq=2, vx=1.0)) is None
+      with pytest.raises(ValueError):
+          s.handle_cmd_vel("a", cmd(seq=3, vx=math.nan))
+      clock.t += 0.06
+      assert s.watchdog_tripped() is True
+
+
+  def test_default_clock_is_monotonic():
+      import inspect
+      import time
+
+      default = inspect.signature(ControlSession.__init__).parameters["clock"].default
+      assert default is time.monotonic
+  ```
+
+  **Lệnh kiểm tra** (chạy từ gốc worktree):
+  1. `/home/vth/ws/mecanum_base/.venv/bin/pytest app/server` — mong đợi `61 passed`, không fail, không error.
+  2. `/home/vth/ws/mecanum_base/.venv/bin/pytest` — toàn bộ suite phải qua (không test cũ nào hỏng).
+  3. `grep -rn "1.89" app/server/app_server` — chỉ hiện trong `control.py`, không có trong `config.py`.
+
+  Nếu test fail do chép sai thì sửa cho khớp văn bản trên; nếu fail mà văn bản đã chép đúng, trả `BLOCKED` kèm đầu ra lỗi, đừng tự sửa logic.
+
+  **Điểm cho Opus/Sonnet khi đối chứng** (không phải việc của Haiku):
+  - SAF-04 nói giá trị vượt phạm vi `int16` bị loại và gửi 0: work order này **không** làm ở app server (chỉ loại không hữu hạn, không kẹp, theo `Đạt khi` của T05). Kiểm tra `int16` thuộc robot (T03). Đây là cách đọc, cần Opus xác nhận.
+  - PROTO-1 có trường `src` trong `cmd_vel`: T05 bỏ qua, T06 tự quyết nếu cần.
+  - SAF-03b (watchdog, disconnect) không có trong `Đạt khi` của T05 nhưng nằm trong lõi nên được test ở đây; T06 gọi `watchdog_tripped()` định kỳ và phát `cmd_vel` 0.
+  - Định tuyến `hello`/`arm`, FastAPI, robot link thuộc T06. `connect()` kiểm Origin và đăng ký viewer; T06 gọi sau khi đọc header Origin.
+
+  **Vòng sửa 1 (từ review của Sonnet, kết quả FAIL)**
+
+  Chỉ sửa `app/server/app_server/control.py` và `app/server/tests/test_server.py`.
+
+  1. Trong `token_matches`, thay dòng cuối `return hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8"))` bằng:
+     ```python
+     try:
+         return hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8"))
+     except UnicodeEncodeError:
+         return False
+     ```
+  2. Thay toàn bộ hàm `_finite_number` bằng:
+     ```python
+     def _finite_number(value: Any) -> bool:
+         if not isinstance(value, (int, float)) or isinstance(value, bool):
+             return False
+         try:
+             return math.isfinite(value)
+         except OverflowError:
+             return False
+     ```
+  3. Trong `test_token_matches` của `test_server.py`, thêm dòng cuối hàm: `assert token_matches("\ud800", "secret") is False`.
+  4. Thêm vào cuối `test_server.py`:
+     ```python
+     @pytest.mark.parametrize("field", ["vx", "vy", "wz"])
+     @pytest.mark.parametrize("huge", [10**330, 10**400])
+     def test_validate_cmd_vel_rejects_overflowing_int(field, huge):
+         msg = {"seq": 1, "vx": 0.0, "vy": 0.0, "wz": 0.0}
+         msg[field] = huge
+         with pytest.raises(ValueError):
+             validate_cmd_vel(msg)
+     ```
+  5. Kiểm tra: `/home/vth/ws/mecanum_base/.venv/bin/pytest app/server` phải báo `67 passed`; `/home/vth/ws/mecanum_base/.venv/bin/pytest` phải báo `111 passed`.
 
 ### T06 — Link robot, telemetry, WS operator
 - Trạng thái: TODO · Plan: P2 · Phụ thuộc: T04, T05
