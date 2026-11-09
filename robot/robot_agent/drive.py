@@ -1,106 +1,196 @@
-"""Manual keyboard commands with a bounded command lifetime."""
+"""cmd_vel writer: a one-slot mailbox plus a loop that feeds the STM32 safe velocities.
+
+Velocities are (vx, vy, wz) in STM32 wire units (m/s, m/s, rad/s). There is no speed limit
+here by design (SAF-04); only non-finite values and values that do not fit the STM32 int16
+frame are rejected. All ages use the monotonic clock (time.monotonic_ns).
+"""
 from __future__ import annotations
 
 import math
 import threading
 import time
+from dataclasses import dataclass
 from typing import Any
 
+from .hardware import encode_stm32_velocity_command
+
 ZERO = (0.0, 0.0, 0.0)
-DIRECTIONS = {
-    "w": (1, 0, 0), "s": (-1, 0, 0),
-    "a": (0, 1, 0), "d": (0, -1, 0),
-    "q": (0, 0, 1), "e": (0, 0, -1),
-    "up": (1, 0, 0), "down": (-1, 0, 0),
-    "left": (0, 1, 0), "right": (0, -1, 0),
-}
+_NS = 1_000_000_000
 
 
-class KeyboardDrive:
+@dataclass(frozen=True)
+class WriterHealth:
+    running: bool  # writer thread is alive
+    healthy: bool  # the most recent write attempt succeeded
+    error_count: int  # write/telemetry-read errors since construction
+    last_error: str | None  # "ExceptionType: message" of the latest error
+    rejected_count: int  # set_cmd_vel calls rejected (non-finite or outside int16)
+    last_write_ns: int | None  # monotonic time of the latest successful write
+
+
+class CmdVelWriter:
     def __init__(
-        self, source: Any, *, speed_mps: float = 0.05,
-        yaw_radps: float = 0.25, timeout_s: float = 0.25,
-        telemetry_timeout_s: float = 0.5, enable_motion: bool = False,
+        self,
+        source: Any,
+        *,
+        motion_enabled: bool = False,
+        deadman_s: float = 0.25,
+        telemetry_timeout_s: float = 0.5,
+        period_s: float = 0.05,
+        retry_s: float = 0.2,
+        join_timeout_s: float = 2.0,
     ) -> None:
-        for name, value in (("speed", speed_mps), ("yaw rate", yaw_radps),
-                            ("key timeout", timeout_s), ("telemetry timeout", telemetry_timeout_s)):
-            if not math.isfinite(value) or value <= 0:
+        for name, value in (
+            ("deadman_s", deadman_s),
+            ("telemetry_timeout_s", telemetry_timeout_s),
+            ("period_s", period_s),
+            ("retry_s", retry_s),
+            ("join_timeout_s", join_timeout_s),
+        ):
+            if not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be positive and finite")
-        if speed_mps > 0.2 or yaw_radps > 1.0:
-            raise ValueError("manual speed limits are 0.2 m/s and 1 rad/s")
-        if timeout_s > 0.5 or telemetry_timeout_s > 1.0:
-            raise ValueError("manual timeouts must not exceed 0.5 s (key) and 1 s (telemetry)")
         self.source = source
-        self.speed = speed_mps
-        self.yaw = yaw_radps
-        self.timeout = timeout_s
-        self.telemetry_timeout = telemetry_timeout_s
-        self.motion_allowed = enable_motion
-        self.armed = enable_motion
-        self._command = ZERO
-        self._deadline = 0.0
-        self._lock = threading.RLock()
-        self.stop_event = threading.Event()
-        self.error: Exception | None = None
+        self.motion_enabled = bool(motion_enabled)
+        self.period_s = float(period_s)
+        self.retry_s = float(retry_s)
+        self.join_timeout_s = float(join_timeout_s)
+        self._deadman_ns = int(round(deadman_s * _NS))
+        self._telemetry_ns = int(round(telemetry_timeout_s * _NS))
+        # Mailbox and health state. _lock is held only for short in-memory updates and is
+        # never held while writing to the source.
+        self._lock = threading.Lock()
+        self._cmd: tuple[float, float, float] | None = None
+        self._cmd_ns = 0
+        self._seq = 0
+        self._healthy = False
+        self._error_count = 0
+        self._last_error: str | None = None
+        self._rejected = 0
+        self._last_write_ns: int | None = None
+        self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
-    def press(self, key: str, *, now: float | None = None) -> None:
-        now = time.monotonic() if now is None else now
-        with self._lock:
-            if key == "x":
-                self.armed = False
-            elif key == "r" and self.motion_allowed:
-                self.armed = True
-            direction = DIRECTIONS.get(key)
-            if direction is not None and self.armed:
-                self._command = (direction[0] * self.speed, direction[1] * self.speed,
-                                 direction[2] * self.yaw)
-                self._deadline = now + self.timeout
-            else:
-                self._command = ZERO
-                self._deadline = 0.0
+    # ---- mailbox (never touches the serial port) ----
 
-    def tick(self, *, now: float | None = None, now_ns: int | None = None) -> tuple[float, float, float]:
-        now = time.monotonic() if now is None else now
-        now_ns = time.monotonic_ns() if now_ns is None else now_ns
+    @staticmethod
+    def _fits_frame(values: tuple[Any, Any, Any]) -> bool:
+        # Reuse the encoder so the accepted range is exactly what the STM32 frame can carry
+        # (finite, and round(v * 1000) within int16).
+        try:
+            encode_stm32_velocity_command(*values)
+        except (ValueError, TypeError, OverflowError):
+            return False
+        return True
+
+    def set_cmd_vel(self, vx: float, vy: float, wz: float, now_ns: int | None = None) -> bool:
+        """Store the latest command. Returns False when rejected (the mailbox is then emptied)."""
+        accepted = self._fits_frame((vx, vy, wz))
         with self._lock:
+            stamp = time.monotonic_ns() if now_ns is None else now_ns
+            self._seq += 1
+            if accepted:
+                self._cmd = (float(vx), float(vy), float(wz))
+                self._cmd_ns = stamp
+            else:
+                self._cmd = None
+                self._rejected += 1
+        return accepted
+
+    def clear(self) -> None:
+        """Discard the stored command (link loss). The next write is zero."""
+        with self._lock:
+            self._seq += 1
+            self._cmd = None
+
+    def health(self) -> WriterHealth:
+        thread = self._thread
+        with self._lock:
+            return WriterHealth(
+                running=thread is not None and thread.is_alive(),
+                healthy=self._healthy,
+                error_count=self._error_count,
+                last_error=self._last_error,
+                rejected_count=self._rejected,
+                last_write_ns=self._last_write_ns,
+            )
+
+    def _record_error(self, error: BaseException) -> None:
+        with self._lock:
+            self._healthy = False
+            self._error_count += 1
+            self._last_error = f"{type(error).__name__}: {error}"
+
+    # ---- writing ----
+
+    def _usable(self, cmd_ns: int, sample: Any, now_ns: int) -> bool:
+        if not self.motion_enabled or sample is None or sample.flag_stop:
+            return False
+        if not 0 <= now_ns - sample.t_ns <= self._telemetry_ns:
+            return False
+        return 0 <= now_ns - cmd_ns <= self._deadman_ns
+
+    def tick(self, now_ns: int | None = None) -> tuple[float, float, float] | None:
+        """Write one velocity. Returns what was written, or None when the write failed."""
+        try:
             sample = self.source.latest
-            age_s = (now_ns - sample.t_ns) / 1e9 if sample is not None else math.inf
-            fresh = 0 <= age_s <= self.telemetry_timeout
-            if not self.armed or now >= self._deadline or not fresh or sample.flag_stop:
-                # Discard the command so recovered telemetry cannot restart old motion.
-                self._command = ZERO
-                self._deadline = 0.0
-            self.source.send_velocity(*self._command)
-            return self._command
+        except Exception as error:
+            self._record_error(error)
+            sample = None
+        with self._lock:
+            now = time.monotonic_ns() if now_ns is None else now_ns
+            seq = self._seq
+            command = ZERO
+            if self._cmd is not None:
+                if self._usable(self._cmd_ns, sample, now):
+                    command = self._cmd
+                else:
+                    # Expired, stale telemetry, stop flag or motion off: discard it for good.
+                    self._cmd = None
+        try:
+            self.source.send_velocity(*command)  # outside the lock
+        except Exception as error:
+            with self._lock:
+                if self._seq == seq:  # keep a command that arrived during the failed write
+                    self._cmd = None
+            self._record_error(error)
+            return None
+        with self._lock:
+            self._healthy = True
+            self._last_write_ns = now
+        return command
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                ok = self.tick() is not None
+            except Exception as error:
+                self._record_error(error)
+                ok = False
+            self._stop.wait(self.period_s if ok else self.retry_s)
 
     def start(self) -> None:
         if self._thread is not None:
-            raise RuntimeError("keyboard drive is already started")
-        self.source.send_velocity(*ZERO)
-        self.stop_event.clear()
-        self._thread = threading.Thread(target=self._run, name="keyboard-writer", daemon=True)
-        self._thread.start()
+            raise RuntimeError("cmd_vel writer is already started")
+        self.clear()
+        self._stop.clear()
+        thread = threading.Thread(target=self._run, name="cmd-vel-writer", daemon=True)
+        self._thread = thread
+        thread.start()
 
-    def _run(self) -> None:
-        try:
-            while not self.stop_event.is_set():
-                self.tick()
-                self.stop_event.wait(0.05)
-        except Exception as error:
-            self.error = error
-            self.stop_event.set()
-        finally:
-            try:
-                self.source.send_velocity(*ZERO)
-            except Exception as error:
-                self.error = self.error or error
-
-    def stop(self) -> None:
-        self.stop_event.set()
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
-            if self._thread.is_alive():
-                raise RuntimeError("keyboard writer did not stop; close the serial transport")
+    def stop(self) -> bool:
+        """Stop the loop and try a final zero. Returns True only if both succeeded."""
+        self._stop.set()
+        self.clear()
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=self.join_timeout_s)
+            if thread.is_alive():
+                self._record_error(RuntimeError("cmd_vel writer thread did not stop in time"))
+                return False
             self._thread = None
-        self.source.send_velocity(*ZERO)
+        try:
+            self.source.send_velocity(*ZERO)
+        except Exception as error:
+            self._record_error(error)
+            return False
+        return True
