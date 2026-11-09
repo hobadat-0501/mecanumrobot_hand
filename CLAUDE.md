@@ -8,7 +8,7 @@ Ba file phải đối chứng chéo: mọi mã spec có task, mọi task trỏ t
 ## Quy tắc không được vi phạm
 
 - Lệnh chuyển động duy nhất là `cmd_vel (vx, vy, wz)`. Không gửi tốc độ bánh hay đích xuống robot.
-- `cmd_vel` chia 1.89 **chỉ** trong `app/server/app_server/control.py`. Không đưa hệ số này vào client, UI, hay payload tới web. Robot không biết hệ số.
+- Không có hệ số quy đổi `cmd_vel` hay telemetry (hệ số 1.89 cũ đã bỏ). Không thêm lại hệ số nhân/chia nào mà chưa có yêu cầu của người dùng.
 - Robot luôn mặc định dừng: disarm khi khởi động, deadman ở mọi chặng. Không thêm đường đi nào vượt qua các lớp này. Không thêm giới hạn tốc độ nếu người dùng chưa yêu cầu.
 - Không chạy động cơ thật khi người dùng chưa xác nhận có mặt cạnh robot.
 - Firmware STM32 là của bên ngoài: không viết, không sửa, không đề xuất nạp code vào STM. STM chỉ nhận `cmd_vel` và trả telemetry; mọi cơ chế an toàn nằm ở phía Jetson và app server.

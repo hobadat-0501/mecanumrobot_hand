@@ -20,10 +20,8 @@ from app_server import main as app_main
 from app_server import telemetry as telemetry_module
 from app_server.config import ConfigError, load_settings
 from app_server.control import (
-    CMD_VEL_DIVISOR,
     ControlSession,
     origin_allowed,
-    to_wire_units,
     token_matches,
     validate_cmd_vel,
 )
@@ -105,7 +103,6 @@ def test_config_bad_port():
 def test_config_has_no_divisor_setting():
     s = load_settings(dict(BASE_ENV, CMD_VEL_DIVISOR="5"))
     assert not any("divisor" in f.lower() for f in s.__dataclass_fields__)
-    assert CMD_VEL_DIVISOR == 1.89
 
 
 # ---- disarm by default, arm rights ----
@@ -146,57 +143,29 @@ def test_arm_requires_bool_and_driver():
     assert s.armed is False
 
 
-# ---- 1.89 division, single function ----
+# ---- cmd_vel passes through unchanged ----
 
-def test_divisor_constant():
-    assert CMD_VEL_DIVISOR == 1.89
-
-
-def test_to_wire_units_divides_all_three():
-    vx, vy, wz = to_wire_units(1.89, -3.78, 0.189)
-    assert vx == pytest.approx(1.0)
-    assert vy == pytest.approx(-2.0)
-    assert wz == pytest.approx(0.1)
-
-
-def test_to_wire_units_known_vector():
-    vx, vy, wz = to_wire_units(0.1, 0.1, 0.1)
-    for v in (vx, vy, wz):
-        assert v == pytest.approx(0.1 / 1.89)
-    assert round(vx * 1000) == 53  # 52.91 mm/s
-
-
-def test_handle_cmd_vel_output_is_wire_only():
+def test_handle_cmd_vel_passes_values_through():
     s = driver_session()
     s.arm("a", True)
     out = s.handle_cmd_vel("a", cmd(seq=7, vx=1.89, vy=3.78, wz=-0.945))
-    assert set(out) == {"seq", "vx", "vy", "wz"}
-    assert out["seq"] == 7
-    assert out["vx"] == pytest.approx(1.0)
-    assert out["vy"] == pytest.approx(2.0)
-    assert out["wz"] == pytest.approx(-0.5)
+    assert out == {"seq": 7, "vx": 1.89, "vy": 3.78, "wz": -0.945}
 
 
-def test_snapshot_web_units_without_factor_or_wire_values():
+def test_snapshot_holds_the_commanded_velocity():
     s = driver_session()
     s.arm("a", True)
-    s.handle_cmd_vel("a", cmd(seq=3, vx=1.89, vy=0.0, wz=0.0))
+    s.handle_cmd_vel("a", cmd(seq=3, vx=0.2, vy=0.0, wz=0.0))
     snap = s.snapshot()
-    assert snap["cmd"] == {"vx": 1.89, "vy": 0.0, "wz": 0.0}
+    assert snap["cmd"] == {"vx": 0.2, "vy": 0.0, "wz": 0.0}
     assert snap["last_cmd_seq"] == 3
-    text = repr(snap)
-    assert "1.89" in text  # the web-unit value itself
-    assert "divisor" not in text.lower()
-    assert repr(1.0) not in repr(snap["cmd"])  # wire value is absent
 
 
-def test_divisor_only_used_in_to_wire_units():
+def test_no_scaling_code_in_control():
     import inspect
 
     src = inspect.getsource(control)
-    body = inspect.getsource(control.to_wire_units)
-    assert src.count("/ CMD_VEL_DIVISOR") == 3
-    assert body.count("/ CMD_VEL_DIVISOR") == 3
+    assert "DIVISOR" not in src and "to_wire_units" not in src
 
 
 # ---- no clamping (SAF-04) ----
@@ -206,9 +175,9 @@ def test_no_speed_limit(big):
     s = driver_session()
     s.arm("a", True)
     out = s.handle_cmd_vel("a", cmd(vx=big, vy=-big, wz=big))
-    assert out["vx"] == pytest.approx(big / 1.89)
-    assert out["vy"] == pytest.approx(-big / 1.89)
-    assert out["wz"] == pytest.approx(big / 1.89)
+    assert out["vx"] == big
+    assert out["vy"] == -big
+    assert out["wz"] == big
     assert s.snapshot()["cmd"]["vx"] == big
 
 
@@ -572,11 +541,11 @@ SNAPSHOT = {
 }
 
 
-def test_telemetry_vel_is_multiplied_imu_is_not():
+def test_telemetry_vel_and_imu_pass_through_unchanged():
     t = Telemetry()
     t.on_robot_state(robot_state(vel=(0.1, 0.0, 0.0), seq=4))
     state = t.build_state(SNAPSHOT, True)
-    assert state["vel"]["vx"] == pytest.approx(0.189)
+    assert state["vel"]["vx"] == pytest.approx(0.1)
     assert state["vel"]["vy"] == 0.0
     assert state["imu"] == {"ax": 0.01, "ay": 0.02, "az": 9.81, "gx": 0.003, "gy": 0.004,
                             "gz": 0.005}
@@ -615,12 +584,12 @@ def test_telemetry_ignores_malformed_fields():
     json.dumps(state, allow_nan=False)
 
 
-def test_telemetry_odometry_uses_scaled_vel_and_robot_time():
+def test_telemetry_odometry_uses_vel_and_robot_time():
     t = Telemetry()
     t.on_robot_state(robot_state(t_ns=0, vel=(0.5, 0.0, 0.0)))
     t.on_robot_state(robot_state(t_ns=STEP_NS, vel=(0.5, 0.0, 0.0)))
     t.on_robot_state(robot_state(t_ns=2 * STEP_NS, vel=(0.5, 0.0, 0.0)))
-    assert t.build_state(SNAPSHOT, True)["pose"]["x"] == pytest.approx(0.189)
+    assert t.build_state(SNAPSHOT, True)["pose"]["x"] == pytest.approx(0.1)
 
 
 def test_telemetry_clear_robot_keeps_pose_and_reset_clears_it():
@@ -630,23 +599,19 @@ def test_telemetry_clear_robot_keeps_pose_and_reset_clears_it():
     t.clear_robot()
     state = t.build_state(SNAPSHOT, False)
     assert state["vel"] is None and state["imu"] is None and state["health"] is None
-    assert state["pose"]["x"] == pytest.approx(0.0945)
+    assert state["pose"]["x"] == pytest.approx(0.05)
     t.reset_odometry()
     assert t.build_state(SNAPSHOT, False)["pose"] == {"x": 0.0, "y": 0.0, "theta": 0.0}
 
 
-def test_telemetry_uses_the_control_constant_only():
+def test_no_scaling_code_in_server_modules():
     import inspect
 
     from app_server import robot_link
 
-    assert telemetry_module.CMD_VEL_DIVISOR is control.CMD_VEL_DIVISOR
-    assert inspect.getsource(telemetry_module).count("* CMD_VEL_DIVISOR") == 1
-    for module in (telemetry_module, app_main, robot_link):
+    for module in (telemetry_module, app_main, robot_link, control):
         source = inspect.getsource(module)
-        assert "1.89" not in source
-    for module in (app_main, robot_link):
-        assert "CMD_VEL_DIVISOR" not in inspect.getsource(module)
+        assert "1.89" not in source and "DIVISOR" not in source
 
 
 # ---- test doubles: a fake robot WebSocket server and the app under uvicorn ----
@@ -829,30 +794,6 @@ def nonzero(robot):
 
 def zeros(robot):
     return [c for c in robot.cmds() if is_zero(c)]
-
-
-def numbers_and_keys(value, key=""):
-    """Yield (key, number) for every numeric leaf and (key, None) for every dict key."""
-    if isinstance(value, dict):
-        for k, v in value.items():
-            yield k, None
-            yield from numbers_and_keys(v, k)
-    elif isinstance(value, list):
-        for v in value:
-            yield from numbers_and_keys(v, key)
-    elif isinstance(value, (int, float)) and not isinstance(value, bool):
-        yield key, value
-
-
-def assert_web_units_only(texts, wire_values):
-    """No payload may hold a wire-unit value, the factor, its inverse, or a telling key."""
-    forbidden = tuple(wire_values) + (1.89, 1 / 1.89)
-    for text in texts:
-        assert "1.89" not in text
-        for key, number in numbers_and_keys(json.loads(text)):
-            assert not any(w in key.lower() for w in ("wire", "divisor", "factor", "scale"))
-            if number is not None:
-                assert not any(math.isclose(number, f, rel_tol=1e-6) for f in forbidden)
 
 
 # ---- Hub: a slow client must not block the others ----
@@ -1045,7 +986,6 @@ async def test_health_endpoint(robot):
         assert response.status_code == 200
         body = response.json()
         assert body["ok"] is True and body["robot_link"] is True
-        assert_web_units_only([response.text], WIRE_VEL)
 
 
 async def test_bad_or_missing_origin_is_refused_before_accept(robot):
@@ -1059,11 +999,11 @@ async def test_bad_or_missing_origin_is_refused_before_accept(robot):
         assert app.runtime.session.driver is None
 
 
-async def test_web_command_reaches_robot_in_wire_units(robot):
+async def test_web_command_reaches_robot_unchanged(robot):
     async with running_app(robot.url) as app:
         async with operator(app) as ws:
             await arm_as_driver(ws, app)
-            await send(ws, t="cmd_vel", seq=7, vx=0.189, vy=-0.378, wz=0.0945, src="kbd")
+            await send(ws, t="cmd_vel", seq=7, vx=0.1, vy=-0.2, wz=0.05, src="kbd")
             await wait_until(lambda: nonzero(robot))
             command = nonzero(robot)[0]
             assert set(command) == {"t", "seq", "vx", "vy", "wz"}  # src stripped
@@ -1072,19 +1012,19 @@ async def test_web_command_reaches_robot_in_wire_units(robot):
             assert command["vy"] == pytest.approx(-0.2)
             assert command["wz"] == pytest.approx(0.05)
             state = await state_where(ws, lambda s: s["cmd"]["vx"] != 0.0)
-            assert state["cmd"] == {"vx": 0.189, "vy": -0.378, "wz": 0.0945}  # web units
+            assert state["cmd"] == {"vx": 0.1, "vy": -0.2, "wz": 0.05}
 
 
-async def test_state_is_in_web_units_and_passes_last_cmd_seq(robot):
+async def test_state_passes_velocity_and_last_cmd_seq(robot):
     async with running_app(robot.url) as app:
         async with operator(app, drive=False) as ws:
             await wait_until(lambda: app.runtime.link.connected)
             await robot.send_state(robot_state(t_ns=1, vel=(0.1, 0.05, 0.2), seq=42))
             state = await state_where(ws, lambda s: s["vel"] is not None)
-            assert state["vel"]["vx"] == pytest.approx(0.189)
-            assert state["vel"]["vy"] == pytest.approx(0.0945)
-            assert state["vel"]["wz"] == pytest.approx(0.378)
-            assert state["imu"]["az"] == 9.81  # IMU is not scaled
+            assert state["vel"]["vx"] == pytest.approx(0.1)
+            assert state["vel"]["vy"] == pytest.approx(0.05)
+            assert state["vel"]["wz"] == pytest.approx(0.2)
+            assert state["imu"]["az"] == 9.81
             assert state["last_cmd_seq"] == 42
             assert state["link"]["robot"] is True
             assert state["session"]["role"] == "viewer"
@@ -1116,26 +1056,6 @@ async def test_state_rate_is_at_most_20_hz(robot):
                 await asyncio.gather(flooder, return_exceptions=True)
             elapsed = time.monotonic() - started
             assert 5 <= count <= 20 * elapsed + 2
-
-
-async def test_no_wire_values_or_factor_in_any_web_payload(robot):
-    async with running_app(robot.url) as app:
-        async with operator(app) as ws:
-            await arm_as_driver(ws, app)
-            await send(ws, t="cmd_vel", seq=1, vx=0.3402, vy=0.0, wz=0.0)  # wire 0.18
-            await wait_until(lambda: nonzero(robot))
-            for n in range(4):
-                await robot.send_state(robot_state(t_ns=n * STEP_NS, seq=1))
-            texts = []
-            deadline = time.monotonic() + 0.6
-            while time.monotonic() < deadline:
-                try:
-                    texts.append(await asyncio.wait_for(ws.recv(), 0.2))
-                except asyncio.TimeoutError:
-                    break
-            assert len(texts) >= 5
-            assert any(json.loads(t)["vel"] is not None for t in texts)
-            assert_web_units_only(texts, WIRE_VEL + (0.18,))
 
 
 async def test_watchdog_sends_zero_after_250ms_without_commands(robot):
@@ -1230,8 +1150,8 @@ async def test_viewer_may_watch_but_not_command(robot):
             await robot.send_state(robot_state(t_ns=0, vel=(0.5, 0.0, 0.0)))
             await robot.send_state(robot_state(t_ns=STEP_NS, vel=(0.5, 0.0, 0.0)))
             await robot.send_state(robot_state(t_ns=2 * STEP_NS, vel=(0.5, 0.0, 0.0)))
-            moved = await state_where(viewer, lambda s: s["pose"]["x"] > 0.18)
-            assert moved["pose"]["x"] == pytest.approx(0.189)
+            moved = await state_where(viewer, lambda s: s["pose"]["x"] > 0.09)
+            assert moved["pose"]["x"] == pytest.approx(0.1)
             assert moved["session"]["role"] == "viewer"
             await send(viewer, t="hello", token="wrong")
             await send(viewer, t="arm", on=False)
@@ -1240,7 +1160,7 @@ async def test_viewer_may_watch_but_not_command(robot):
             states = await drain_states(viewer, 0.2)
             assert len(states) >= 2
             assert all(s["session"]["armed"] for s in states)  # the viewer's arm(false) ignored
-            assert all(s["pose"]["x"] == pytest.approx(0.189) for s in states)  # so was reset
+            assert all(s["pose"]["x"] == pytest.approx(0.1) for s in states)  # so was reset
             assert nonzero(robot) == []
             await send(driver, t="odom_reset")  # the driver may reset
             await state_where(viewer, lambda s: s["pose"]["x"] == 0.0)
@@ -1308,10 +1228,10 @@ async def test_end_to_end_with_the_real_robot_server_and_simulator(robot):
                 await arm_as_driver(ws, app)
                 await send(ws, t="cmd_vel", seq=5, vx=0.189, vy=0.0, wz=0.0, src="kbd")
                 await wait_until(lambda: real.build_state()["last_cmd_seq"] == 5)
-                assert writer.tick() == (pytest.approx(0.1), 0.0, 0.0)  # wire units at the robot
-                assert stm.last_command[1] == pytest.approx(0.1)
+                assert writer.tick() == (pytest.approx(0.189), 0.0, 0.0)
+                assert stm.last_command[1] == pytest.approx(0.189)
                 state = await state_where(ws, lambda s: s["vel"] and s["vel"]["vx"] > 0.185)
-                assert state["vel"]["vx"] == pytest.approx(0.189, abs=0.005)  # web units again
+                assert state["vel"]["vx"] == pytest.approx(0.189, abs=0.005)
                 assert state["last_cmd_seq"] == 5
     finally:
         await real.close()
@@ -1470,11 +1390,11 @@ def test_telemetry_flag_stop_must_be_a_bool_or_int(junk):
     json.dumps(state, allow_nan=False)
 
 
-def test_telemetry_vel_that_overflows_when_scaled_is_dropped():
+def test_telemetry_huge_finite_vel_keeps_state_valid_json():
     t = Telemetry()
     t.on_robot_state(robot_state(vel=(1e308, 0.0, 0.0)))
     state = t.build_state(SNAPSHOT, True)
-    assert state["vel"] is None
+    assert state["vel"] == {"vx": 1e308, "vy": 0.0, "wz": 0.0}
     json.dumps(state, allow_nan=False)
 
 

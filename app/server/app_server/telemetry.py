@@ -1,16 +1,12 @@
-"""Telemetry: scale robot velocity to web units, odometry (PHY-7), build the web `state`.
+"""Telemetry: robot velocity, odometry (PHY-7), build the web `state`.
 
-SAF-01: only `vel` is multiplied by CMD_VEL_DIVISOR (the same constant control.py divides by).
-IMU and every other field pass through unscaled. Nothing built here carries the factor or a
-wire-unit velocity, so the web only ever sees web units.
+SAF-01: no scaling anywhere: `vel`, IMU and every other field pass through unchanged.
 """
 
 from __future__ import annotations
 
 import math
 from typing import Any, Dict, Optional
-
-from .control import CMD_VEL_DIVISOR
 
 MAX_DT_S = 0.5  # PHY-7: samples further apart than this are not integrated
 _NS_PER_S = 1e9
@@ -157,9 +153,7 @@ class Telemetry:
         raw_vel = _finite_dict(msg.get("vel"), ("vx", "vy", "wz"))
         self._vel = None
         if raw_vel is not None:
-            scaled = {key: value * CMD_VEL_DIVISOR for key, value in raw_vel.items()}
-            if all(math.isfinite(value) for value in scaled.values()):  # a huge value overflows when scaled
-                self._vel = scaled
+            self._vel = raw_vel
         t_ns = msg.get("t_mono_ns")
         if self._vel is not None and isinstance(t_ns, int) and not isinstance(t_ns, bool):
             self.odometry.update(t_ns, self._vel["vx"], self._vel["vy"], self._vel["wz"])
