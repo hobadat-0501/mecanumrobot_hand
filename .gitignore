@@ -12,9 +12,6 @@ Desktop.ini
 .env
 .env.*
 !.env.example
-/configs/local*.yaml
-/configs/local*.yml
-/configs/local*.json
 
 # Python environments, packaging and test output
 __pycache__/
