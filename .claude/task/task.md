@@ -5853,7 +5853,7 @@ Trạng thái: `TODO → ORDERED → CODED → PASS → MERGED` hoặc `BLOCKED`
   **Ghi chú cho T11/T12 (không thuộc vòng sửa này):** (1) với dt điều khiển lớn (0.1 s) độ vọt mô phỏng lên ~0.1 m do giới hạn gia tốc rời rạc; T11 giữ 20 Hz. (2) T12 phải bỏ mẫu vận tốc không hữu hạn hoặc gọi `DynamicsEstimator.reset()`: một mẫu NaN làm bộ lọc hỏng cho tới khi reset.
 
 ### T08 — Kết nối, bàn phím toàn cục, khung ứng dụng
-- Trạng thái: ORDERED · Plan: P3 · Phụ thuộc: T06, T07
+- Trạng thái: CODED · Plan: P3 · Phụ thuộc: T06, T07
 - Spec: FR-01, FR-02, FR-03, FR-08, FR-09, SAF-03, PROTO-1, NFR-03, NFR-05
 - File: `app/client/src/app/layout.tsx`, `app/client/src/robot/{protocol,control,control.test,store}.ts`, `app/client/src/robot/keyboard.tsx`, `app/client/eslint.config.mjs` (miễn trừ cho mã shadcn sẵn có), `app/client/src/components/robot/app-shell.tsx`, trang tạm cho các route trong FR-01 (T09–T13 thay thế)
 - Đạt khi: lái được từ mọi trang trên mô phỏng, nhiều phím cộng vector, gõ trong ô nhập không làm xe chạy, `Esc` luôn dừng, rời tab thì gửi 0, chuyển trang không rớt WS.
