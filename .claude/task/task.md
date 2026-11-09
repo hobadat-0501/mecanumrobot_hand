@@ -1154,7 +1154,7 @@ Trạng thái: `TODO → ORDERED → CODED → PASS → MERGED` hoặc `BLOCKED`
 ## P2 — App server
 
 ### T05 — Lõi điều khiển
-- Trạng thái: CODED · Plan: P2 · Phụ thuộc: T01
+- Trạng thái: MERGED · Plan: P2 · Phụ thuộc: T01
 - Spec: FR-03, SAF-01, SAF-02, SAF-04, SAF-07, PROTO-1
 - File: `app/server/app_server/{config,control}.py`, `app/server/tests/test_server.py`
 - Đạt khi: test bao phủ disarm mặc định, chia hệ số cả ba thành phần ở một hàm, không kẹp tốc độ, loại giá trị không hữu hạn, chỉ một operator, sai token chỉ được xem, Origin không hợp lệ bị từ chối.
