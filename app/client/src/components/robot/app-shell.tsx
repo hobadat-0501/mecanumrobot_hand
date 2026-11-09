@@ -22,13 +22,13 @@ import { usePathname } from "next/navigation";
 import { useEffect, useId, useState } from "react";
 import type { ComponentType, FormEvent, ReactNode } from "react";
 
+import { SOURCE_LABEL } from "@/components/robot/panels";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Kbd, KbdGroup } from "@/components/ui/kbd";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import { parseSpeed } from "@/robot/control";
-import type { Source } from "@/robot/control";
 import {
   emergencyStop,
   setArmed,
@@ -55,13 +55,6 @@ const NAV: readonly NavItem[] = [
   { href: "/system", label: "Hệ thống", short: "Hệ thống", Icon: Cpu },
 ];
 
-const SOURCE_LABEL: Record<Source, string> = {
-  idle: "Không có",
-  keyboard: "Bàn phím",
-  forward: "Chạy động học thuận",
-  inverse: "Chạy động học ngược",
-};
-
 type Tone = "ok" | "warn" | "bad" | "idle";
 
 const TONE_CLASS: Record<Tone, string> = {
@@ -86,6 +79,7 @@ function Chip({ tone, children }: { tone: Tone; children: ReactNode }) {
 
 function connectionChip(s: ShellSnapshot): { tone: Tone; text: string } {
   if (s.conn === "open") {
+    if (s.stale) return { tone: "bad", text: "Mất dữ liệu" };
     return s.hasState
       ? { tone: "ok", text: "Đã kết nối" }
       : { tone: "warn", text: "Chờ dữ liệu" };
@@ -137,8 +131,17 @@ function StatusBar({ shell }: { shell: ShellSnapshot }) {
             )}
             {connection.text}
           </Chip>
-          <Chip tone={!shell.hasState ? "idle" : shell.robotLink ? "ok" : "bad"}>
-            Robot: {!shell.hasState ? "—" : shell.robotLink ? "đã nối" : "mất link"}
+          <Chip
+            tone={!shell.hasState ? "idle" : shell.stale || !shell.robotLink ? "bad" : "ok"}
+          >
+            Robot:{" "}
+            {!shell.hasState
+              ? "—"
+              : shell.stale
+                ? "không rõ"
+                : shell.robotLink
+                  ? "đã nối"
+                  : "mất link"}
           </Chip>
           <Chip tone={driver ? "ok" : "idle"}>
             <KeyRound className="size-3.5" />
