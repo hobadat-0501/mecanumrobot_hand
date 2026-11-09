@@ -79,6 +79,7 @@ export function isTypingTarget(target: FocusLike | null | undefined): boolean {
 export type KeyAction =
   | { kind: "motion"; code: string }
   | { kind: "arm" }
+  | { kind: "cancel" }
   | { kind: "stop" };
 
 export interface KeyContext {
@@ -92,6 +93,8 @@ export interface KeyContext {
 export function decideKeyDown(code: string, ctx: KeyContext): KeyAction | null {
   if (code === "Escape") return { kind: "stop" };
   if (ctx.typing || ctx.modifier) return null;
+  // Space hủy lần chạy đang diễn ra (động học thuận/ngược), thay cho nút Dừng.
+  if (code === "Space") return { kind: "cancel" };
   if (code === "KeyX") return { kind: "stop" };
   if (code === "KeyR") return { kind: "arm" };
   if (motionActionOf(code) !== null) return { kind: "motion", code };

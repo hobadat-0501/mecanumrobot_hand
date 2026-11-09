@@ -43,8 +43,6 @@ export interface InverseFields {
   theta: string; // độ
   vCruise: string;
   wzCruise: string;
-  accelLin: string;
-  accelAng: string;
 }
 
 export const DEFAULT_FIELDS: InverseFields = {
@@ -55,8 +53,6 @@ export const DEFAULT_FIELDS: InverseFields = {
   theta: "30",
   vCruise: String(DEFAULT_RUN_PARAMS.vCruise),
   wzCruise: String(DEFAULT_RUN_PARAMS.wzCruise),
-  accelLin: String(DEFAULT_RUN_PARAMS.accelLin),
-  accelAng: String(DEFAULT_RUN_PARAMS.accelAng),
 };
 
 export type FieldKey = keyof InverseFields;
@@ -69,8 +65,6 @@ export const FIELD_LABEL: Record<FieldKey, string> = {
   theta: "θ đích",
   vCruise: "Tốc độ chạy",
   wzCruise: "Tốc độ quay chạy",
-  accelLin: "Gia tốc tịnh tiến",
-  accelAng: "Gia tốc góc",
 };
 
 /** Mục tiêu đã phân tích, đơn vị chuẩn (m, rad). Kiểu A chưa quy đổi vì cần tư thế lúc bấm chạy. */
@@ -129,8 +123,6 @@ export function parseInverseFields(
   const params: RunParams = {
     vCruise: pos("vCruise"),
     wzCruise: pos("wzCruise"),
-    accelLin: pos("accelLin"),
-    accelAng: pos("accelAng"),
   };
   const keys = Object.keys(errors) as FieldKey[];
   if (keys.length > 0) {

@@ -5,7 +5,7 @@
 // Nút Chạy chỉ gửi cmd_vel (vx, vy, wz) đã tính, qua startRun của store (FR-03).
 // Số liệu tần số cao nằm ngoài React state (NFR-03): MotionMeter cập nhật theo từng state.
 
-import { OctagonX, Play, TriangleAlert } from "lucide-react";
+import { Play, TriangleAlert } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
@@ -207,10 +207,9 @@ export default function ForwardPage() {
                 <Play data-icon="inline-start" />
                 Chạy
               </Button>
-              <Button type="button" variant="destructive" disabled={!running} onClick={() => cancelRun()}>
-                <OctagonX data-icon="inline-start" />
-                Dừng
-              </Button>
+              <p className="self-center text-sm text-muted-foreground">
+                Bấm <kbd className="rounded border bg-muted px-1.5 py-0.5 font-mono text-xs">Space</kbd> để dừng.
+              </p>
             </div>
             {block !== null && !running ? (
               <p className="mt-2 text-sm text-muted-foreground">Chưa chạy được: {block}</p>

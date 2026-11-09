@@ -4,7 +4,7 @@
 // hoặc kiểu B (đích x, y, θ theo khung odometry). Chạy bằng bộ bám đích của motion.ts qua store;
 // đầu ra duy nhất là cmd_vel. Số liệu tần số cao đọc theo chu kỳ 10 Hz, không nằm trong React state.
 
-import { Play, Square } from "lucide-react";
+import { Play } from "lucide-react";
 import { useId, useState } from "react";
 
 import {
@@ -32,7 +32,7 @@ import {
 } from "@/robot/inverse";
 import type { FieldKey, InputKind, InverseFields } from "@/robot/inverse";
 import { inverseKinematics } from "@/robot/mecanum";
-import { cancelRun, getTelemetry, startRun, useShell } from "@/robot/store";
+import { getTelemetry, startRun, useShell } from "@/robot/store";
 import type { ShellSnapshot } from "@/robot/store";
 
 // Lần chạy gần nhất, giữ ở module để không mất khi chuyển trang trong lúc đang chạy.
@@ -216,12 +216,10 @@ export default function Page() {
           </div>
         </Panel>
 
-        <Panel title="Tham số chạy" description="Mặc định theo PHY-6; mọi giá trị dương đều được nhận, không có giới hạn trên.">
+        <Panel title="Tham số chạy" description="Mọi giá trị dương đều được nhận. Gia tốc do STM đảm nhiệm nên không nhập ở đây.">
           <div className="grid grid-cols-2 gap-3">
             <Field id={`${uid}-v`} label="Tốc độ chạy" unit="m/s" value={fields.vCruise} error={errors.vCruise} onChange={set("vCruise")} />
             <Field id={`${uid}-w`} label="Tốc độ quay" unit="rad/s" value={fields.wzCruise} error={errors.wzCruise} onChange={set("wzCruise")} />
-            <Field id={`${uid}-a`} label="Gia tốc tịnh tiến" unit="m/s²" value={fields.accelLin} error={errors.accelLin} onChange={set("accelLin")} />
-            <Field id={`${uid}-al`} label="Gia tốc góc" unit="rad/s²" value={fields.accelAng} error={errors.accelAng} onChange={set("accelAng")} />
           </div>
         </Panel>
       </div>
@@ -232,10 +230,9 @@ export default function Page() {
             <Play data-icon="inline-start" />
             Chạy
           </Button>
-          <Button type="button" size="lg" variant="outline" className="flex-1 sm:flex-none" disabled={!running} onClick={() => cancelRun()}>
-            <Square data-icon="inline-start" />
-            Hủy
-          </Button>
+          <p className="self-center text-sm text-muted-foreground">
+            Bấm <kbd className="rounded border bg-muted px-1.5 py-0.5 font-mono text-xs">Space</kbd> để dừng.
+          </p>
         </div>
         <p role="status" className="min-w-0 text-sm text-muted-foreground sm:ml-2">
           {startError ?? blocker ?? (running ? "Đang chạy tới đích." : "Sẵn sàng.")}

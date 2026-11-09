@@ -167,7 +167,7 @@ describe("PHY-6 góc và đích", () => {
   it("tham số không hợp lệ bị từ chối", () => {
     const o: Pose = { x: 0, y: 0, theta: 0 };
     expect(() => createTrack(o, o, { ...DEFAULT_RUN_PARAMS, vCruise: 0 })).toThrow(RangeError);
-    expect(() => createTrack(o, o, { ...DEFAULT_RUN_PARAMS, accelAng: NaN })).toThrow(RangeError);
+    expect(() => createTrack(o, o, { ...DEFAULT_RUN_PARAMS, wzCruise: NaN })).toThrow(RangeError);
   });
 });
 
@@ -207,12 +207,11 @@ describe("PHY-6 bộ bám đích trên mô hình tích phân", () => {
     expect(Math.hypot(goal.x - r.pose.x, goal.y - r.pose.y)).toBeLessThan(0.02);
     expect(Math.abs(wrapAngle(goal.theta - r.pose.theta))).toBeLessThan(0.035);
     expect(r.maxSpeed).toBeLessThanOrEqual(DEFAULT_RUN_PARAMS.vCruise + 1e-9);
-    expect(r.maxDv).toBeLessThanOrEqual(DEFAULT_RUN_PARAMS.accelLin + 1e-9);
     expect(r.state.elapsed).toBeLessThan(r.state.timeoutS);
   });
 
   it("tới đích với tham số chạy khác (nhanh hơn)", () => {
-    const params: RunParams = { vCruise: 0.5, wzCruise: 2, accelLin: 2, accelAng: 3 };
+    const params: RunParams = { vCruise: 0.5, wzCruise: 2 };
     const goal: Pose = { x: 1.2, y: -0.7, theta: 0.4 };
     const r = simulate({ x: 0.3, y: 0.3, theta: 0.9 }, goal, params);
     expect(r.status).toEqual({ kind: "done" });
@@ -220,12 +219,12 @@ describe("PHY-6 bộ bám đích trên mô hình tích phân", () => {
     expect(Math.abs(wrapAngle(goal.theta - r.pose.theta))).toBeLessThan(0.035);
   });
 
-  it("chu kỳ đầu giữ hướng vector và bị giới hạn gia tốc", () => {
+  it("chu kỳ đầu giữ hướng vector và bị giới hạn bởi tốc độ chạy", () => {
     const s = createTrack({ x: 0, y: 0, theta: 0 }, { x: 1, y: 1, theta: 0 }, DEFAULT_RUN_PARAMS);
     const out = trackStep(s, { pose: { x: 0, y: 0, theta: 0 }, dt: 0.05, stateAgeS: 0, armed: true, keyPressed: false });
     expect(out.status).toEqual({ kind: "running" });
     expect(out.cmd.vx).toBeCloseTo(out.cmd.vy, 9);
-    expect(Math.hypot(out.cmd.vx, out.cmd.vy)).toBeCloseTo(0.5 * 0.05, 9);
+    expect(Math.hypot(out.cmd.vx, out.cmd.vy)).toBeCloseTo(DEFAULT_RUN_PARAMS.vCruise, 9);
   });
 
   it("sai số quay về khung thân: theta = pi/2, đích ở +x thế giới -> đi sang phải (vy < 0)", () => {
@@ -233,11 +232,11 @@ describe("PHY-6 bộ bám đích trên mô hình tích phân", () => {
     const s = createTrack({ x: 0, y: 0, theta: Math.PI / 2 }, g, DEFAULT_RUN_PARAMS);
     const out = trackStep(s, { pose: { x: 0, y: 0, theta: Math.PI / 2 }, dt: 0.05, stateAgeS: 0, armed: true, keyPressed: false });
     expect(out.cmd.vx).toBeCloseTo(0, 9);
-    expect(out.cmd.vy).toBeCloseTo(-0.025, 9);
+    expect(out.cmd.vy).toBeCloseTo(-DEFAULT_RUN_PARAMS.vCruise, 9);
   });
 
-  it("giới hạn phanh: vCruise = 2, accelLin = 0.5, 10 m, vọt đích dưới 0.05 m", () => {
-    const params: RunParams = { vCruise: 2, wzCruise: 1, accelLin: 0.5, accelAng: 1.5 };
+  it("tiến gần đích không vọt: vCruise = 2, 10 m, vọt đích dưới 0.05 m", () => {
+    const params: RunParams = { vCruise: 2, wzCruise: 1 };
     const goal: Pose = { x: 10, y: 0, theta: 0 };
     const r = simulate({ x: 0, y: 0, theta: 0 }, goal, params);
     expect(r.status).toEqual({ kind: "done" });
@@ -246,8 +245,8 @@ describe("PHY-6 bộ bám đích trên mô hình tích phân", () => {
     expect(r.state.elapsed).toBeLessThan(r.state.timeoutS);
   });
 
-  it("giới hạn phanh góc: wzCruise = 6, accelAng = 1.5, quay 3 rad, vọt dưới 0.05 rad", () => {
-    const params: RunParams = { vCruise: 0.2, wzCruise: 6, accelLin: 0.5, accelAng: 1.5 };
+  it("tiến gần đích góc không vọt: wzCruise = 6, quay 3 rad, vọt dưới 0.05 rad", () => {
+    const params: RunParams = { vCruise: 0.2, wzCruise: 6 };
     const goal: Pose = { x: 0, y: 0, theta: 3 };
     const r = simulate({ x: 0, y: 0, theta: 0 }, goal, params);
     expect(r.status).toEqual({ kind: "done" });

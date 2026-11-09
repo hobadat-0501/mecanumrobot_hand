@@ -40,7 +40,7 @@ describe("đổi đơn vị và phân tích ô nhập", () => {
 
   it("mặc định hợp lệ, tham số chạy lấy từ DEFAULT_RUN_PARAMS", () => {
     const v = parsed("distance");
-    expect(v.params).toEqual({ vCruise: 0.2, wzCruise: 1, accelLin: 0.5, accelAng: 1.5 });
+    expect(v.params).toEqual({ vCruise: 0.2, wzCruise: 1 });
     expect(v.target).toEqual({ kind: "distance", s: 0.5, alpha: 0 });
   });
 
@@ -53,9 +53,9 @@ describe("đổi đơn vị và phân tích ô nhập", () => {
   });
 
   it("không có chặn trên cho tham số chạy (SAF-04)", () => {
-    const v = parsed("distance", { vCruise: "1000", accelAng: "1e6" });
+    const v = parsed("distance", { vCruise: "1000", wzCruise: "1e6" });
     expect(v.params.vCruise).toBe(1000);
-    expect(v.params.accelAng).toBe(1e6);
+    expect(v.params.wzCruise).toBe(1e6);
   });
 
   it("ô rỗng, chữ, 0 hoặc âm: lỗi, không có NaN", () => {
@@ -190,7 +190,7 @@ describe("vòng kín: bộ điều khiển với ô nhập đã phân tích", ()
   });
 
   it("tham số lớn vẫn tới đích (không chặn trên)", () => {
-    const input = parsed("pose", { x: "1", y: "-1", theta: "-90", vCruise: "5", accelLin: "20" });
+    const input = parsed("pose", { x: "1", y: "-1", theta: "-90", vCruise: "5" });
     const r = simulate({ x: 0, y: 0, theta: 0 }, input, 0.02);
     expect(r.done).toBe(true);
   });
@@ -221,7 +221,7 @@ describe("InverseRun", () => {
 
   it("ném RangeError với tham số không hợp lệ", () => {
     expect(
-      () => new InverseRun({ x: 0, y: 0, theta: 0 }, { x: 1, y: 0, theta: 0 }, { vCruise: NaN, wzCruise: 1, accelLin: 1, accelAng: 1 }),
+      () => new InverseRun({ x: 0, y: 0, theta: 0 }, { x: 1, y: 0, theta: 0 }, { vCruise: NaN, wzCruise: 1 }),
     ).toThrow(RangeError);
   });
 });
