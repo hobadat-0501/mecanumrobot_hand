@@ -40,7 +40,7 @@ Quy ước mã: `FR` chức năng, `SAF` an toàn, `FIX` lỗi code cũ, `PROTO`
 | SAF-05 | Writer ép 0 khi telemetry cũ hơn 0.5 s hoặc firmware bật cờ dừng. | T03, T14 |
 | SAF-06 | Writer gặp lỗi ghi thì báo lỗi, xóa lệnh, tự thử lại; sau khi phục hồi vẫn xuất 0 cho đến khi có lệnh mới. | T03 |
 | SAF-07 | Xác thực: link robot dùng `ROBOT_LINK_TOKEN`, robot chỉ bind IP Tailscale, kết nối hợp lệ mới nhất thay kết nối cũ. Operator: `hello` kèm `OPERATOR_TOKEN`, kiểm tra Origin; không có mã thì chỉ xem. Một operator giữ quyền lái tại một thời điểm. | T04, T05, T14 |
-| SAF-08 | Trước khi chạy thật phải thử watchdog firmware với bánh nhấc khỏi mặt đất. Nếu firmware không tự dừng khi mất lệnh, ghi nhận rủi ro và chờ người dùng quyết định. | T15 |
+| SAF-08 | Firmware STM32 không được sửa. Trước khi chạy thật chỉ quan sát hành vi của firmware (nhấc bánh khỏi mặt đất, gửi một lệnh tốc độ thấp rồi ngừng gửi) để biết nó có tự dừng khi mất lệnh không. Nếu không, ghi nhận rủi ro và chờ người dùng quyết định; lớp bảo vệ duy nhất phía Jetson là deadman của writer. | T15 |
 
 ## 4. Lỗi code cũ phải sửa
 
@@ -83,7 +83,7 @@ Bánh A, B, C, D với `ε = (+,−,+,−)`, `s = (−,−,+,+)` (theo `docs/dyn
 | Mã | Yêu cầu | Task |
 |---|---|---|
 | NFR-01 | Cấu trúc thư mục theo plan.md §3. Không tạo file chỉ để bọc một hàm, mỗi file một trách nhiệm rõ. | T01 |
-| NFR-02 | Mục tiêu đo được: độ trễ vòng lệnh (`cmd_vel` → `last_cmd_seq` trong state) p95 ≤ 150 ms trên Tailscale; tự dừng sau mất link ≤ 300 ms. | T14, T15 |
+| NFR-02 | Mục tiêu đo được: độ trễ vòng lệnh (`cmd_vel` → `last_cmd_seq` trong state) p95 ≤ 150 ms trên Tailscale; tự dừng ≤ 300 ms sau một sự kiện mất link (socket đóng, ngắt kết nối, disarm); khi bên gửi chỉ im lặng thì tính từ lệnh cuối: deadman 250 ms cộng ≤ 300 ms, tức ≤ 550 ms. | T14, T15 |
 | NFR-03 | Không dồn hàng đợi ở mọi chặng: chỉ giữ bản mới nhất, trừ `arm` và lệnh dừng. Trên web, dữ liệu tần số cao nằm ngoài React state (store + `useSyncExternalStore`, canvas qua ref). | T04, T06, T08 |
 | NFR-04 | Có test cho giải mã, writer, control, odometry, công thức PHY. Toàn bộ test và lint phải qua. | T07, T14 |
 | NFR-05 | Python ≥ 3.10 (Jetson). Next.js 16 có thay đổi lớn: phải đọc `app/client/node_modules/next/dist/docs/` trước khi viết code client. | T01, T08 |

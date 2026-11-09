@@ -129,12 +129,18 @@ class RobotServer:
     # ---- handshake ----
 
     def _authorized(self, header: str | None) -> bool:
-        return hmac.compare_digest((header or "").encode("utf-8"), self._expected)
+        try:
+            supplied = (header or "").encode("utf-8")
+        except UnicodeEncodeError:  # e.g. lone surrogates from a non-ASCII header
+            return False
+        return hmac.compare_digest(supplied, self._expected)
 
     def _process_request(self, connection: Any, request: Any) -> Any:
         if urlsplit(request.path).path != WS_PATH:
             return connection.respond(HTTPStatus.NOT_FOUND, "not found\n")
-        if not self._authorized(request.headers.get("Authorization")):
+        values = request.headers.get_all("Authorization")
+        # A duplicated Authorization header is refused, never resolved by picking one.
+        if len(values) != 1 or not self._authorized(values[0]):
             return connection.respond(HTTPStatus.UNAUTHORIZED, "unauthorized\n")
         return None
 

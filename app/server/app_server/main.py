@@ -154,7 +154,10 @@ def create_app(
         period = 1.0 / state_hz
         due = loop.time()
         while True:
-            hub.publish(build_state(), session.role)
+            try:
+                hub.publish(build_state(), session.role)
+            except Exception:
+                log.exception("broadcast iteration failed")  # one bad iteration must not end the loop
             due += period
             now = loop.time()
             if due < now:
@@ -175,8 +178,11 @@ def create_app(
 
     async def watchdog_loop() -> None:
         while True:
-            if session.watchdog_tripped():
-                link.send_zero()
+            try:
+                if session.watchdog_tripped():
+                    link.send_zero()
+            except Exception:
+                log.exception("watchdog iteration failed")  # keep watching, SAF-03
             await asyncio.sleep(watchdog_tick_s)
 
     def handle_text(client_id: str, text: str) -> None:
@@ -223,7 +229,7 @@ def create_app(
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    app = FastAPI(lifespan=lifespan)
+    app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.runtime = SimpleNamespace(session=session, link=link, telemetry=telemetry, hub=hub)
 
     @app.get("/health")

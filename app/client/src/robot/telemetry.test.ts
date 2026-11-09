@@ -62,6 +62,15 @@ describe("LatencyTracker", () => {
     expect(t.stats().count).toBe(2);
   });
 
+  it("chỉ khớp đúng last_cmd_seq, không khớp seq lớn hơn hay nhỏ hơn", () => {
+    const t = new LatencyTracker();
+    t.sent(5, 100);
+    expect(t.ack(7, 120)).toBeNull(); // seq 7 là của tab khác, không phải của tab này
+    expect(t.ack(4, 130)).toBeNull();
+    expect(t.stats().count).toBe(0);
+    expect(t.ack(5, 160)).toBe(60); // seq 5 vẫn còn chờ, không bị xóa nhầm
+  });
+
   it("giới hạn cửa sổ, hàng chờ, và bỏ seq quá hạn", () => {
     const t = new LatencyTracker(3, 2, 1000);
     for (let i = 1; i <= 5; i++) {
