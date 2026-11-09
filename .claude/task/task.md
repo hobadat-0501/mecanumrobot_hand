@@ -9103,3 +9103,4 @@ Trạng thái: `TODO → ORDERED → CODED → PASS → MERGED` hoặc `BLOCKED`
 - Nút Dừng/Hủy ở hai trang chạy được thay bằng phím `Space` (FR-02): `decideKeyDown("Space")` → `cancel` → `cancelRun()`.
 - Trang động học ngược: một khối "Đích và thời gian" (đích + thời gian + nút Chạy) đặt ngang với khối "Tiến độ"; bỏ khối "Lệnh đang gửi", thay bằng "Tốc độ tính được" (bốn bánh, vx, vy, |v|, wz) suy ra từ quãng đường/thời gian bằng `planInverse`. Bỏ ô nhập tốc độ chạy/quay. Chữ hiển thị trên web không còn mã nội bộ (cmd_vel, PHY, A-4, app server).
 - Bỏ hệ số 1.89 (SAF-01, A-1, PHY-7, D-03): `to_wire_units`/`CMD_VEL_DIVISOR` đã xóa, `cmd_vel` và telemetry giữ nguyên giá trị. Các đoạn mã và test có 1.89 trong T05/T06/T14 ở trên là lịch sử, đã bị thay thế.
+- Dừng khẩn chỉ còn phím `Space` (FR-02): bỏ `X` và `Esc`; Space luôn có hiệu lực kể cả khi focus ở ô nhập, gọi `emergencyStop` (hủy chạy, gửi 0, disarm).
