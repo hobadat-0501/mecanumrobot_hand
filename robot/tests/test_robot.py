@@ -1,11 +1,16 @@
+import asyncio
+import json
 import struct
 import threading
 import time
 from types import SimpleNamespace
 
 import pytest
+from websockets.asyncio.client import connect
+from websockets.exceptions import InvalidStatus
 
-from robot_agent import drive, hardware
+from robot_agent import __main__ as agent
+from robot_agent import config, drive, hardware, server, sim
 
 
 def test_package_imports():
@@ -450,3 +455,522 @@ def test_initial_health():
         rejected_count=0,
         last_write_ns=None,
     )
+
+
+class TimedSource(FakeDriveSource):
+    def __init__(self, t_ns: int) -> None:
+        super().__init__(t_ns)
+        self.times: list[float] = []
+        self.second_attempt = threading.Event()
+
+    def send_velocity(self, vx: float, vy: float, wz: float) -> None:
+        self.times.append(time.monotonic())
+        if len(self.times) == 2:
+            self.second_attempt.set()
+        super().send_velocity(vx, vy, wz)
+
+
+def test_retry_backoff_is_waited_after_write_error():
+    source = TimedSource(T0)
+    source.fail_first = 1
+    writer = drive.CmdVelWriter(source, period_s=0.01, retry_s=0.2)
+    writer.start()
+    try:
+        assert source.second_attempt.wait(3.0)
+    finally:
+        assert writer.stop() is True
+    # The first write failed, so the next attempt must wait retry_s (not the 0.01 s period).
+    assert source.times[1] - source.times[0] >= 0.18
+
+
+# ---------------------------------------------------------------- T04: config
+
+
+def _clear_robot_env(monkeypatch) -> None:
+    for name in (
+        "ROBOT_MOTION_ENABLED",
+        "ROBOT_SIMULATE",
+        "STM_PORT",
+        "STM_BAUD",
+        "LIDAR_PORT",
+        "LIDAR_BAUD",
+        "ROBOT_BIND_HOST",
+        "ROBOT_BIND_PORT",
+        "ROBOT_LINK_TOKEN",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_config_defaults_are_safe():
+    cfg = config.load_config({"ROBOT_LINK_TOKEN": "x"})
+    assert cfg.motion_enabled is False
+    assert cfg.simulate is False
+    assert cfg.bind_host == "127.0.0.1"
+    assert cfg.bind_port == 8765
+    assert cfg.stm_baud == 115200
+    assert cfg.lidar_baud == 460800
+    assert cfg.link_token == "x"
+
+
+def test_config_parses_values():
+    cfg = config.load_config(
+        {
+            "ROBOT_LINK_TOKEN": "tok",
+            "ROBOT_MOTION_ENABLED": "TRUE",
+            "ROBOT_SIMULATE": "1",
+            "ROBOT_BIND_HOST": "100.69.39.18",
+            "ROBOT_BIND_PORT": "9000",
+            "STM_PORT": "/dev/ttyUSB0",
+        }
+    )
+    assert cfg.motion_enabled is True
+    assert cfg.simulate is True
+    assert cfg.bind_host == "100.69.39.18"
+    assert cfg.bind_port == 9000
+    assert cfg.stm_port == "/dev/ttyUSB0"
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {},
+        {"ROBOT_LINK_TOKEN": ""},
+        {"ROBOT_LINK_TOKEN": "   "},
+        {"ROBOT_LINK_TOKEN": "x", "ROBOT_BIND_HOST": "0.0.0.0"},
+        {"ROBOT_LINK_TOKEN": "x", "ROBOT_MOTION_ENABLED": "maybe"},
+        {"ROBOT_LINK_TOKEN": "x", "ROBOT_BIND_PORT": "abc"},
+        {"ROBOT_LINK_TOKEN": "x", "ROBOT_BIND_PORT": "70000"},
+    ],
+)
+def test_config_refuses_bad_values(env):
+    with pytest.raises(config.ConfigError):
+        config.load_config(env)
+
+
+def test_config_reads_env_file_and_real_env_wins(tmp_path, monkeypatch):
+    _clear_robot_env(monkeypatch)
+    env_file = tmp_path / ".env"
+    env_file.write_text("ROBOT_LINK_TOKEN=from-file\nROBOT_BIND_PORT=9001\nROBOT_SIMULATE=true\n")
+    cfg = config.load_config(env_file=env_file)
+    assert (cfg.link_token, cfg.bind_port, cfg.simulate) == ("from-file", 9001, True)
+    monkeypatch.setenv("ROBOT_BIND_PORT", "9002")
+    assert config.load_config(env_file=env_file).bind_port == 9002
+
+
+def test_config_missing_env_file_means_empty_token(tmp_path, monkeypatch):
+    _clear_robot_env(monkeypatch)
+    with pytest.raises(config.ConfigError):
+        config.load_config(env_file=tmp_path / "missing.env")
+
+
+# ------------------------------------------------------------------ T04: sim
+
+
+def test_sim_stm32_first_order_response_in_wire_units():
+    now = [1_000]
+    stm = sim.SimulatedStm32(tau_s=0.1, clock_ns=lambda: now[0])
+    assert stm.latest is None
+    stm.start()
+    first = stm.latest
+    assert (first.vx_mps, first.vy_mps, first.wz_radps) == (0.0, 0.0, 0.0)
+    stm.send_velocity(0.1, -0.1, 0.0)
+    now[0] += 100_000_000  # one time constant: 1 - exp(-1) = 0.632 of the target
+    one_tau = stm.latest
+    assert one_tau.vx_mps == pytest.approx(0.063, abs=1e-9)
+    assert one_tau.vy_mps == pytest.approx(-0.063, abs=1e-9)
+    assert one_tau.t_ns > first.t_ns
+    now[0] += 1_000_000_000
+    settled = stm.latest
+    assert settled.vx_mps == pytest.approx(0.1, abs=1e-9)
+    assert settled.t_ns > one_tau.t_ns
+    assert stm.last_command[1:] == (0.1, -0.1, 0.0)
+    assert stm.latest_aux is not None and stm.latest_aux.t_ns == settled.t_ns
+
+
+def test_sim_stm32_timestamps_never_go_backwards():
+    now = [5_000]
+    stm = sim.SimulatedStm32(clock_ns=lambda: now[0])
+    stm.start()
+    stamps = []
+    for value in (6_000, 6_000, 5_500, 7_000):
+        now[0] = value
+        stamps.append(stm.latest.t_ns)
+    assert stamps == sorted(stamps)
+
+
+def test_sim_stm32_validates_and_requires_start():
+    stm = sim.SimulatedStm32()
+    with pytest.raises(RuntimeError):
+        stm.send_velocity(0.0, 0.0, 0.0)
+    stm.start()
+    with pytest.raises(ValueError):
+        stm.send_velocity(float("nan"), 0.0, 0.0)
+    with pytest.raises(ValueError):
+        stm.send_velocity(32.768, 0.0, 0.0)
+    stm.stop()
+    assert stm.latest is None
+    with pytest.raises(RuntimeError):
+        stm.send_velocity(0.0, 0.0, 0.0)
+
+
+def test_sim_lidar_produces_scans_at_the_configured_rate():
+    now = [0]
+    lidar = sim.SimulatedLidar(period_s=0.1, clock_ns=lambda: now[0])
+    assert lidar.latest is None
+    assert lidar.scan_rate_hz == 0.0
+    lidar.start()
+    assert lidar.latest is None  # first scan only after one full period
+    assert lidar.scan_rate_hz == pytest.approx(10.0)
+    now[0] = 100_000_000
+    first = lidar.latest
+    assert len(first.points) == 360
+    assert first.t_ns == 100_000_000
+    assert lidar.latest is first  # same period, same scan
+    now[0] = 250_000_000
+    assert lidar.latest.t_ns == 200_000_000
+    lidar.stop()
+    assert lidar.latest is None
+
+
+# ---------------------------------------------------------------- T04: server
+
+TOKEN = "unit-test-token"
+AUTH = {"Authorization": f"Bearer {TOKEN}"}
+
+
+class FakeWriter:
+    def __init__(self) -> None:
+        self.calls: list[tuple[float, float, float]] = []
+        self.clears = 0
+
+    def set_cmd_vel(self, vx, vy, wz, now_ns=None) -> bool:
+        self.calls.append((vx, vy, wz))
+        return True
+
+    def clear(self) -> None:
+        self.clears += 1
+
+    def health(self) -> drive.WriterHealth:
+        return drive.WriterHealth(True, True, 0, None, 0, None)
+
+
+def _devices_ok() -> dict:
+    ok = {"ok": True, "state": "ok", "error": None, "restarts": 0}
+    return {"stm": dict(ok), "lidar": dict(ok)}
+
+
+async def wait_for(predicate, timeout: float = 3.0) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not predicate():
+        if loop.time() > deadline:
+            raise AssertionError("timed out waiting for condition")
+        await asyncio.sleep(0.005)
+
+
+class Rig:
+    def __init__(self, srv, writer, stm, port: int) -> None:
+        self.srv = srv
+        self.writer = writer
+        self.stm = stm
+        self.url = f"ws://127.0.0.1:{port}/ws"
+
+    def connect(self, headers=AUTH, url=None):
+        return connect(url or self.url, additional_headers=headers)
+
+
+async def _make_rig(writer, devices=_devices_ok) -> Rig:
+    stm = sim.SimulatedStm32()
+    stm.start()
+    srv = server.RobotServer(token=TOKEN, writer=writer, stm=stm, devices=devices)
+    port = await srv.start("127.0.0.1", 0)
+    return Rig(srv, writer, stm, port)
+
+
+@pytest.fixture
+async def rig():
+    made = await _make_rig(FakeWriter())
+    yield made
+    await made.srv.close()
+    made.stm.stop()
+
+
+def _cmd(seq=1, vx=0.1, vy=0.0, wz=0.0, **extra) -> str:
+    return json.dumps({"t": "cmd_vel", "seq": seq, "vx": vx, "vy": vy, "wz": wz, **extra})
+
+
+async def test_wrong_or_missing_token_is_refused_at_handshake(rig):
+    for headers in (
+        {"Authorization": "Bearer wrong"},
+        {"Authorization": "Bearer "},
+        {"Authorization": TOKEN},
+        {"Authorization": f"bearer {TOKEN}"},
+        {},
+    ):
+        with pytest.raises(InvalidStatus) as refused:
+            async with rig.connect(headers):
+                pass
+        assert refused.value.response.status_code == 401
+    assert rig.writer.calls == []
+    assert rig.writer.clears == 0
+
+
+async def test_other_path_is_refused(rig):
+    with pytest.raises(InvalidStatus) as refused:
+        async with rig.connect(url=rig.url.replace("/ws", "/other")):
+            pass
+    assert refused.value.response.status_code == 404
+
+
+async def test_valid_cmd_vel_reaches_the_writer(rig):
+    async with rig.connect() as ws:
+        await ws.send(_cmd(seq=5, vx=0.1, vy=-0.2, wz=0.3))
+        await wait_for(lambda: rig.writer.calls == [(0.1, -0.2, 0.3)])
+        # Integers are valid numbers too, and there is no speed limit here.
+        await ws.send(_cmd(seq=6, vx=3, vy=0, wz=-9))
+        await wait_for(lambda: len(rig.writer.calls) == 2)
+    assert rig.writer.calls[1] == (3, 0, -9)
+
+
+async def test_anything_but_cmd_vel_never_reaches_the_writer(rig):
+    bad = [
+        "not json",
+        "{",
+        "",
+        "null",
+        "[]",
+        "[1, 2, 3]",
+        '"cmd_vel"',
+        "42",
+        json.dumps({"t": "arm", "on": True}),
+        json.dumps({"t": "hello", "token": "x"}),
+        json.dumps({"t": "odom_reset"}),
+        json.dumps({"t": "state"}),
+        json.dumps({"seq": 1, "vx": 0.1, "vy": 0, "wz": 0}),
+        json.dumps({"t": "cmd_vel", "seq": 1, "vx": 0.1, "vy": 0}),
+        json.dumps({"t": "cmd_vel", "seq": 1, "vx": "0.1", "vy": 0, "wz": 0}),
+        json.dumps({"t": "cmd_vel", "seq": 1, "vx": True, "vy": 0, "wz": 0}),
+        json.dumps({"t": "cmd_vel", "seq": 1, "vx": None, "vy": 0, "wz": 0}),
+        json.dumps({"t": "cmd_vel", "seq": "1", "vx": 0.1, "vy": 0, "wz": 0}),
+        json.dumps({"t": "cmd_vel", "seq": 1.5, "vx": 0.1, "vy": 0, "wz": 0}),
+        json.dumps({"t": "cmd_vel", "seq": True, "vx": 0.1, "vy": 0, "wz": 0}),
+        json.dumps({"t": "wheel_speeds", "seq": 1, "vx": 0.1, "vy": 0, "wz": 0}),
+        _cmd(src="keyboard"),
+        _cmd().encode(),  # a binary frame, even with valid JSON inside
+        b"\x00\x01\x02",
+    ]
+    async with rig.connect() as ws:
+        for message in bad:
+            await ws.send(message)
+        await ws.send(_cmd(seq=99, vx=0.5))  # sentinel, processed after all of the above
+        await wait_for(lambda: len(rig.writer.calls) >= 1)
+    assert rig.writer.calls == [(0.5, 0.0, 0.0)]
+    assert rig.srv.ignored == len(bad)
+
+
+async def test_new_connection_replaces_the_old_one(rig):
+    async with rig.connect() as first:
+        await first.send(_cmd(seq=1, vx=0.1))
+        await wait_for(lambda: len(rig.writer.calls) == 1)
+        async with rig.connect() as second:
+            await asyncio.wait_for(first.wait_closed(), 3.0)
+            assert first.close_code == 4000
+            assert rig.writer.clears == 1  # the replaced link's command was cleared
+            await second.send(_cmd(seq=2, vx=0.2))
+            await wait_for(lambda: len(rig.writer.calls) == 2)
+            assert rig.writer.calls[1] == (0.2, 0.0, 0.0)
+        await wait_for(lambda: rig.writer.clears == 2)  # and the newest one clears on close
+
+
+async def test_disconnect_clears_writer_and_zero_is_written():
+    made = await _make_rig(FakeWriter())
+    # Real writer on the simulated STM32. A long deadman proves clear() stops the robot,
+    # not the 250 ms timeout.
+    stm_writer = drive.CmdVelWriter(
+        made.stm, motion_enabled=True, deadman_s=30.0, period_s=0.01, retry_s=0.01
+    )
+    made.srv.writer = stm_writer
+    stm_writer.start()
+    try:
+        async with made.connect() as ws:
+            await ws.send(_cmd(seq=1, vx=0.2, vy=0.0, wz=0.0))
+            await wait_for(
+                lambda: made.stm.last_command is not None and made.stm.last_command[1] == 0.2
+            )
+        await wait_for(lambda: made.stm.last_command[1:] == (0.0, 0.0, 0.0))
+        await asyncio.sleep(0.1)  # the old command does not come back
+        assert made.stm.last_command[1:] == (0.0, 0.0, 0.0)
+    finally:
+        await made.srv.close()
+        assert await asyncio.to_thread(stm_writer.stop) is True
+        made.stm.stop()
+
+
+async def test_state_messages_have_required_fields_and_rate_limit(rig):
+    messages = []
+    async with rig.connect() as ws:
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        while loop.time() - start < 0.6:
+            messages.append(json.loads(await asyncio.wait_for(ws.recv(), 1.0)))
+        await ws.send(_cmd(seq=7))
+        while True:
+            state = json.loads(await asyncio.wait_for(ws.recv(), 1.0))
+            if state["last_cmd_seq"] == 7:
+                break
+    first = messages[0]
+    assert first["t"] == "state"
+    assert isinstance(first["t_mono_ns"], int)
+    assert first["last_cmd_seq"] is None
+    assert set(first["vel"]) == {"vx", "vy", "wz"}
+    assert set(first["imu"]) == {"ax", "ay", "az", "gx", "gy", "gz"}
+    assert first["voltage"] == 12.0
+    assert first["flag_stop"] == 0
+    assert set(first["charge"]) == {"current_a", "red", "charging", "set_state"}
+    assert set(first["health"]) == {"stm", "lidar", "writer"}
+    assert first["health"]["stm"]["ok"] is True
+    assert set(first["health"]["writer"]) == {
+        "running",
+        "healthy",
+        "error_count",
+        "last_error",
+        "rejected_count",
+    }
+    stamps = [m["t_mono_ns"] for m in messages]
+    assert stamps == sorted(stamps)
+    assert len(messages) >= 5
+    assert len(messages) <= 0.6 * 50 + 3  # at most about 50 Hz
+
+
+async def test_state_without_telemetry_has_null_sensor_fields():
+    made = await _make_rig(FakeWriter())
+    made.stm.stop()  # no telemetry at all
+    try:
+        async with made.connect() as ws:
+            state = json.loads(await asyncio.wait_for(ws.recv(), 1.0))
+        assert state["vel"] is None and state["imu"] is None and state["charge"] is None
+        assert state["voltage"] is None and state["flag_stop"] is None
+        assert isinstance(state["t_mono_ns"], int)
+    finally:
+        await made.srv.close()
+
+
+async def test_failed_device_does_not_stop_the_server_and_is_retried():
+    allow_lidar = threading.Event()
+    attempts = []
+
+    class FlakyLidar(sim.SimulatedLidar):
+        def start(self) -> None:
+            attempts.append(1)
+            if not allow_lidar.is_set():
+                raise OSError("no lidar")
+            super().start()
+
+    stm_dev = agent.SupervisedDevice(
+        "stm", sim.SimulatedStm32, agent._latest_stamp, stale_s=1.0, poll_s=0.01
+    )
+    lidar_dev = agent.SupervisedDevice(
+        "lidar",
+        lambda: FlakyLidar(period_s=0.02),
+        agent._latest_stamp,
+        stale_s=1.0,
+        backoff_s=0.01,
+        max_backoff_s=0.02,
+        poll_s=0.01,
+    )
+    writer = drive.CmdVelWriter(stm_dev, motion_enabled=True, period_s=0.01, retry_s=0.01)
+    srv = server.RobotServer(
+        token=TOKEN,
+        writer=writer,
+        stm=stm_dev,
+        devices=lambda: {"stm": stm_dev.health(), "lidar": lidar_dev.health()},
+    )
+    port = await srv.start("127.0.0.1", 0)
+    writer.start()
+    tasks = [asyncio.ensure_future(stm_dev.run()), asyncio.ensure_future(lidar_dev.run())]
+    try:
+        await wait_for(lambda: stm_dev.health()["ok"] and len(attempts) >= 2)
+        async with connect(f"ws://127.0.0.1:{port}/ws", additional_headers=AUTH) as ws:
+            state = json.loads(await asyncio.wait_for(ws.recv(), 1.0))
+            assert state["health"]["lidar"]["ok"] is False
+            assert "no lidar" in state["health"]["lidar"]["error"]
+            assert state["health"]["stm"]["ok"] is True
+            assert state["vel"] is not None  # the STM32 side keeps working
+            allow_lidar.set()
+            await wait_for(lambda: lidar_dev.health()["ok"])
+            assert lidar_dev.health()["restarts"] >= 2
+            await ws.send(_cmd(seq=3, vx=0.1))
+            await wait_for(lambda: stm_dev.latest.vx_mps > 0.0)  # writer still drives the sim
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await srv.close()
+        await asyncio.to_thread(writer.stop)
+
+
+async def test_stalled_device_is_restarted():
+    created = []
+
+    class Frozen:
+        def __init__(self) -> None:
+            self.latest = SimpleNamespace(t_ns=1)
+            self.stopped = False
+
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    def factory() -> Frozen:
+        created.append(Frozen())
+        return created[-1]
+
+    device = agent.SupervisedDevice(
+        "stm",
+        factory,
+        agent._latest_stamp,
+        stale_s=0.1,
+        backoff_s=0.01,
+        max_backoff_s=0.02,
+        poll_s=0.01,
+    )
+    task = asyncio.ensure_future(device.run())
+    try:
+        await wait_for(lambda: len(created) >= 2)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert created[0].stopped is True
+    assert device.restarts >= 1
+    assert device.latest is None  # no source is exposed once supervision ended
+    assert created[-1].stopped is True
+
+
+async def test_device_without_source_is_safe_for_the_writer():
+    device = agent.SupervisedDevice("stm", sim.SimulatedStm32, agent._latest_stamp, stale_s=1.0)
+    assert device.latest is None
+    assert device.latest_aux is None
+    with pytest.raises(RuntimeError):
+        device.send_velocity(0.0, 0.0, 0.0)
+    assert device.health()["ok"] is False
+
+
+async def test_bind_retries_until_the_address_is_available():
+    class FlakyServer:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        async def start(self, host, port):
+            self.attempts += 1
+            if self.attempts < 3:
+                raise OSError(99, "Cannot assign requested address")
+            return 4321
+
+    fake = FlakyServer()
+    port = await asyncio.wait_for(
+        agent.bind_with_retry(fake, "100.69.39.18", 8765, delay_s=0.001, max_delay_s=0.002), 3.0
+    )
+    assert port == 4321
+    assert fake.attempts == 3
