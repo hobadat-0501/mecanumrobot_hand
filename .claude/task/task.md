@@ -1170,7 +1170,7 @@ Trạng thái: `TODO → ORDERED → CODED → PASS → MERGED` hoặc `BLOCKED`
 ## P3 — Nền client
 
 ### T07 — Thư viện vật lý
-- Trạng thái: CODED · Plan: P3 · Phụ thuộc: T01
+- Trạng thái: MERGED · Plan: P3 · Phụ thuộc: T01
 - Spec: PHY-1, PHY-2, PHY-3, PHY-4, PHY-5, PHY-6, NFR-04
 - File: `app/client/src/robot/{mecanum,motion,mecanum.test}.ts`, `app/client/package.json` và `package-lock.json` (thêm vitest)
 - Đạt khi: các test vector trong PHY-2, PHY-3, PHY-5 qua; thuận rồi ngược trả lại đầu vào; bộ bám đạt tiêu chí xong trên mô hình giả lập.
