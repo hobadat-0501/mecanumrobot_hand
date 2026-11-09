@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mecanum-base"
-version = "0.2.0.dev0"
+version = "0.2.0rc1"
 description = "Mecanum robot agent (Jetson) and app server for the web control system"
 requires-python = ">=3.10"
 dependencies = []
