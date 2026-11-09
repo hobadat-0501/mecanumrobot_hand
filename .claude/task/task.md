@@ -7740,9 +7740,9 @@ Trạng thái: `TODO → ORDERED → CODED → PASS → MERGED` hoặc `BLOCKED`
 - Work order: _(Sonnet điền)_
 
 ### T10 — Động học thuận
-- Trạng thái: TODO · Plan: P4 · Phụ thuộc: T09
+- Trạng thái: CODED · Plan: P4 · Phụ thuộc: T09
 - Spec: FR-04, PHY-2, PHY-3, PHY-4
-- File: `app/client/src/app/kinematics/forward/page.tsx`
+- File: `app/client/src/app/kinematics/forward/page.tsx`, `app/client/src/robot/{forward,forward.test}.ts`
 - Đạt khi: đủ chuỗi tính realtime và thành phần dư; chạy có giới hạn thời gian; bấm phím di chuyển thì hủy chạy.
 - Work order: _(Sonnet điền)_
 
