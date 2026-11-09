@@ -596,11 +596,553 @@ Trạng thái: `TODO → ORDERED → CODED → PASS → MERGED` hoặc `BLOCKED`
   5. FIX-7 nói cả "dt", nhưng hiện không có phép tính dt nào dùng đồng hồ hệ thống ngoài tuổi telemetry; `scan_rate_hz` đã dùng `time.monotonic()`.
 
 ### T03 — Writer cmd_vel
-- Trạng thái: TODO · Plan: P1 · Phụ thuộc: T02
+- Trạng thái: MERGED · Plan: P1 · Phụ thuộc: T02
 - Spec: FIX-3, FIX-4, FIX-5, FIX-6, SAF-02, SAF-03, SAF-04, SAF-05, SAF-06
 - File: `robot/robot_agent/drive.py`, `robot/tests/test_robot.py`
 - Đạt khi: test bao phủ `set_cmd_vel` không chặn khi serial chậm, deadman 250 ms, không kẹp tốc độ, giá trị ngoài int16 bị loại và ghi 0, telemetry cũ và cờ dừng ép 0, tự phục hồi sau lỗi ghi mà không chạy lại lệnh cũ, `MOTION_ENABLED=false` chỉ ghi 0.
-- Work order: _(Sonnet điền)_
+- Work order:
+  **QUY TẮC ĐẦU TIÊN: Chỉ chạm hai file `robot/robot_agent/drive.py` và `robot/tests/test_robot.py`. Nếu thiếu thông tin hoặc có mâu thuẫn (ví dụ đoạn "old" không khớp file thật), dừng lại và trả `BLOCKED` kèm câu hỏi. Không chạy `git commit` (và không chạy lệnh git nào làm thay đổi repo). Không sửa `hardware.py`, `pyproject.toml` hay file nào khác. Không tạo `server.py`, `config.py`, `__main__.py` (thuộc T04).**
+
+  Thư mục làm việc: `/home/vth/ws/mecanum_base` (nhánh `feature/T03-cmd-vel-writer`). Dùng `.venv/bin/...`.
+
+  **Quyết định thiết kế đã chốt (Haiku không đổi):**
+  - Bàn phím nay nằm ở web client, nên `KeyboardDrive`, `DIRECTIONS`, `press`, giới hạn 0.2 m/s và 1 rad/s bị xóa hoàn toàn. `drive.py` chỉ còn `ZERO`, `WriterHealth`, `CmdVelWriter`.
+  - `set_cmd_vel` chỉ ghi vào một ô lệnh dưới `threading.Lock` ngắn, không bao giờ chạm serial. `send_velocity` luôn gọi ngoài lock (FIX-4).
+  - Kiểm tra giá trị (SAF-04) tái dùng `hardware.encode_stm32_velocity_command`: giá trị không hữu hạn hoặc `round(v*1000)` ngoài int16 làm encoder ném `ValueError` (cũng bắt `TypeError`, `OverflowError`). Không có kẹp giá trị. Giá trị bị loại: ô lệnh bị xóa, `rejected_count` tăng, tick ghi 0, `set_cmd_vel` trả `False`.
+  - Lệnh hết hạn khi tuổi `now_ns - cmd_ns` nằm ngoài `[0, deadman_s]`; telemetry cũ khi tuổi nằm ngoài `[0, telemetry_timeout_s]` (đúng 250 ms hoặc 500 ms vẫn còn hạn; chỉ "cũ hơn" mới bị loại). Tuổi âm cũng bị loại (để bắt timestamp đồng hồ hệ thống). Lệnh bị loại thì bị xóa hẳn khỏi ô lệnh, không chạy lại.
+  - `motion_enabled=False` (mặc định, kể cả constructor mặc định) thì chỉ ghi 0 và lệnh bị xóa.
+  - Lỗi ghi: ghi nhận lỗi, xóa lệnh (trừ khi có lệnh mới đến trong lúc ghi, dựa vào bộ đếm `_seq`), `tick` trả `None`, vòng lặp chờ `retry_s` rồi thử lại; sau khi phục hồi ghi 0 cho đến khi có `set_cmd_vel` mới (SAF-06).
+  - `start()` không ghi gì đồng bộ; tick đầu tiên của thread sẽ ghi 0. `stop()` trả `True` chỉ khi thread đã dừng và lần ghi 0 cuối thành công; lỗi chỉ được ghi nhận, không ném.
+  - Chỉ dùng `time.monotonic_ns()`; không dùng `time.time`. Tương thích Python 3.10.
+
+  **Bước 1. Thay TOÀN BỘ nội dung `robot/robot_agent/drive.py` bằng đúng đoạn sau.**
+
+  ```python
+  """cmd_vel writer: a one-slot mailbox plus a loop that feeds the STM32 safe velocities.
+
+  Velocities are (vx, vy, wz) in STM32 wire units (m/s, m/s, rad/s). There is no speed limit
+  here by design (SAF-04); only non-finite values and values that do not fit the STM32 int16
+  frame are rejected. All ages use the monotonic clock (time.monotonic_ns).
+  """
+  from __future__ import annotations
+
+  import math
+  import threading
+  import time
+  from dataclasses import dataclass
+  from typing import Any
+
+  from .hardware import encode_stm32_velocity_command
+
+  ZERO = (0.0, 0.0, 0.0)
+  _NS = 1_000_000_000
+
+
+  @dataclass(frozen=True)
+  class WriterHealth:
+      running: bool  # writer thread is alive
+      healthy: bool  # the most recent write attempt succeeded
+      error_count: int  # write/telemetry-read errors since construction
+      last_error: str | None  # "ExceptionType: message" of the latest error
+      rejected_count: int  # set_cmd_vel calls rejected (non-finite or outside int16)
+      last_write_ns: int | None  # monotonic time of the latest successful write
+
+
+  class CmdVelWriter:
+      def __init__(
+          self,
+          source: Any,
+          *,
+          motion_enabled: bool = False,
+          deadman_s: float = 0.25,
+          telemetry_timeout_s: float = 0.5,
+          period_s: float = 0.05,
+          retry_s: float = 0.2,
+          join_timeout_s: float = 2.0,
+      ) -> None:
+          for name, value in (
+              ("deadman_s", deadman_s),
+              ("telemetry_timeout_s", telemetry_timeout_s),
+              ("period_s", period_s),
+              ("retry_s", retry_s),
+              ("join_timeout_s", join_timeout_s),
+          ):
+              if not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                  raise ValueError(f"{name} must be positive and finite")
+          self.source = source
+          self.motion_enabled = bool(motion_enabled)
+          self.period_s = float(period_s)
+          self.retry_s = float(retry_s)
+          self.join_timeout_s = float(join_timeout_s)
+          self._deadman_ns = int(round(deadman_s * _NS))
+          self._telemetry_ns = int(round(telemetry_timeout_s * _NS))
+          # Mailbox and health state. _lock is held only for short in-memory updates and is
+          # never held while writing to the source.
+          self._lock = threading.Lock()
+          self._cmd: tuple[float, float, float] | None = None
+          self._cmd_ns = 0
+          self._seq = 0
+          self._healthy = False
+          self._error_count = 0
+          self._last_error: str | None = None
+          self._rejected = 0
+          self._last_write_ns: int | None = None
+          self._stop = threading.Event()
+          self._thread: threading.Thread | None = None
+
+      # ---- mailbox (never touches the serial port) ----
+
+      @staticmethod
+      def _fits_frame(values: tuple[Any, Any, Any]) -> bool:
+          # Reuse the encoder so the accepted range is exactly what the STM32 frame can carry
+          # (finite, and round(v * 1000) within int16).
+          try:
+              encode_stm32_velocity_command(*values)
+          except (ValueError, TypeError, OverflowError):
+              return False
+          return True
+
+      def set_cmd_vel(self, vx: float, vy: float, wz: float, now_ns: int | None = None) -> bool:
+          """Store the latest command. Returns False when rejected (the mailbox is then emptied)."""
+          accepted = self._fits_frame((vx, vy, wz))
+          with self._lock:
+              stamp = time.monotonic_ns() if now_ns is None else now_ns
+              self._seq += 1
+              if accepted:
+                  self._cmd = (float(vx), float(vy), float(wz))
+                  self._cmd_ns = stamp
+              else:
+                  self._cmd = None
+                  self._rejected += 1
+          return accepted
+
+      def clear(self) -> None:
+          """Discard the stored command (link loss). The next write is zero."""
+          with self._lock:
+              self._seq += 1
+              self._cmd = None
+
+      def health(self) -> WriterHealth:
+          thread = self._thread
+          with self._lock:
+              return WriterHealth(
+                  running=thread is not None and thread.is_alive(),
+                  healthy=self._healthy,
+                  error_count=self._error_count,
+                  last_error=self._last_error,
+                  rejected_count=self._rejected,
+                  last_write_ns=self._last_write_ns,
+              )
+
+      def _record_error(self, error: BaseException) -> None:
+          with self._lock:
+              self._healthy = False
+              self._error_count += 1
+              self._last_error = f"{type(error).__name__}: {error}"
+
+      # ---- writing ----
+
+      def _usable(self, cmd_ns: int, sample: Any, now_ns: int) -> bool:
+          if not self.motion_enabled or sample is None or sample.flag_stop:
+              return False
+          if not 0 <= now_ns - sample.t_ns <= self._telemetry_ns:
+              return False
+          return 0 <= now_ns - cmd_ns <= self._deadman_ns
+
+      def tick(self, now_ns: int | None = None) -> tuple[float, float, float] | None:
+          """Write one velocity. Returns what was written, or None when the write failed."""
+          try:
+              sample = self.source.latest
+          except Exception as error:
+              self._record_error(error)
+              sample = None
+          with self._lock:
+              now = time.monotonic_ns() if now_ns is None else now_ns
+              seq = self._seq
+              command = ZERO
+              if self._cmd is not None:
+                  if self._usable(self._cmd_ns, sample, now):
+                      command = self._cmd
+                  else:
+                      # Expired, stale telemetry, stop flag or motion off: discard it for good.
+                      self._cmd = None
+          try:
+              self.source.send_velocity(*command)  # outside the lock
+          except Exception as error:
+              with self._lock:
+                  if self._seq == seq:  # keep a command that arrived during the failed write
+                      self._cmd = None
+              self._record_error(error)
+              return None
+          with self._lock:
+              self._healthy = True
+              self._last_write_ns = now
+          return command
+
+      def _run(self) -> None:
+          while not self._stop.is_set():
+              try:
+                  ok = self.tick() is not None
+              except Exception as error:
+                  self._record_error(error)
+                  ok = False
+              self._stop.wait(self.period_s if ok else self.retry_s)
+
+      def start(self) -> None:
+          if self._thread is not None:
+              raise RuntimeError("cmd_vel writer is already started")
+          self.clear()
+          self._stop.clear()
+          thread = threading.Thread(target=self._run, name="cmd-vel-writer", daemon=True)
+          self._thread = thread
+          thread.start()
+
+      def stop(self) -> bool:
+          """Stop the loop and try a final zero. Returns True only if both succeeded."""
+          self._stop.set()
+          self.clear()
+          thread = self._thread
+          if thread is not None:
+              thread.join(timeout=self.join_timeout_s)
+              if thread.is_alive():
+                  self._record_error(RuntimeError("cmd_vel writer thread did not stop in time"))
+                  return False
+              self._thread = None
+          try:
+              self.source.send_velocity(*ZERO)
+          except Exception as error:
+              self._record_error(error)
+              return False
+          return True
+  ```
+
+  **Bước 2. `robot/tests/test_robot.py`: hai chỉnh sửa.**
+
+  (a) Phần import ở đầu file:
+  ```python
+  # old
+  import struct
+  import time
+  # new
+  import struct
+  import threading
+  import time
+  ```
+
+  (b) Xóa từ dòng `class FakeDriveSource:` đến hết file (gồm `FakeDriveSource`, `_armed_drive`, `test_tick_freshness_compares_monotonic_values`, `test_tick_default_clock_is_monotonic`), rồi thêm đúng đoạn sau vào cuối file (sau hai dòng trống). Mọi test T02 phía trên giữ nguyên. Hai test cũ được thay bằng `test_stale_telemetry_forces_zero_and_discards_command` (độ tuổi so monotonic, cũ 0.6 s thì ép 0 và xóa lệnh) và `test_default_clock_is_monotonic` (đồng hồ mặc định là monotonic, timestamp epoch bị loại).
+
+  ```python
+  T0 = 10_000_000_000
+  MS = 1_000_000
+
+
+  class FakeDriveSource:
+      def __init__(self, t_ns: int) -> None:
+          self.latest = SimpleNamespace(t_ns=t_ns, flag_stop=0)
+          self.sent: list[tuple[float, float, float]] = []
+          self.attempts = 0
+          self.fail_first = 0
+          self.fail_always = False
+          self.during_send = None
+          self.wrote = threading.Event()
+
+      def send_velocity(self, vx: float, vy: float, wz: float) -> None:
+          self.attempts += 1
+          if self.during_send is not None:
+              self.during_send()
+          if self.fail_always or self.attempts <= self.fail_first:
+              raise OSError("port gone")
+          self.sent.append((vx, vy, wz))
+          self.wrote.set()
+
+
+  class BlockingSource(FakeDriveSource):
+      def __init__(self, t_ns: int) -> None:
+          super().__init__(t_ns)
+          self.entered = threading.Event()
+          self.release = threading.Event()
+
+      def send_velocity(self, vx: float, vy: float, wz: float) -> None:
+          self.entered.set()
+          if not self.release.wait(5.0):
+              raise RuntimeError("test timeout: send_velocity was never released")
+          super().send_velocity(vx, vy, wz)
+
+
+  def _writer(source, **kwargs) -> drive.CmdVelWriter:
+      kwargs.setdefault("motion_enabled", True)
+      return drive.CmdVelWriter(source, **kwargs)
+
+
+  def test_default_writer_writes_only_zero():
+      source = FakeDriveSource(T0)
+      writer = drive.CmdVelWriter(source)
+      assert writer.motion_enabled is False
+      assert writer.set_cmd_vel(0.1, 0.0, 0.0, now_ns=T0) is True
+      assert writer.tick(now_ns=T0 + MS) == drive.ZERO
+      assert source.sent == [drive.ZERO]
+
+
+  def test_motion_enabled_passes_command_unchanged():
+      source = FakeDriveSource(T0)
+      writer = _writer(source)
+      writer.set_cmd_vel(0.1, -0.05, 0.2, now_ns=T0)
+      assert writer.tick(now_ns=T0 + MS) == (0.1, -0.05, 0.2)
+      assert source.sent == [(0.1, -0.05, 0.2)]
+
+
+  def test_no_speed_limit():
+      source = FakeDriveSource(T0)
+      writer = _writer(source)
+      writer.set_cmd_vel(5.0, -3.0, 20.0, now_ns=T0)
+      assert writer.tick(now_ns=T0 + MS) == (5.0, -3.0, 20.0)
+
+
+  def test_int16_boundary_is_accepted_unchanged():
+      source = FakeDriveSource(T0)
+      writer = _writer(source)
+      assert writer.set_cmd_vel(32.767, -32.768, 0.0, now_ns=T0) is True
+      assert writer.tick(now_ns=T0 + MS) == (32.767, -32.768, 0.0)
+      assert writer.health().rejected_count == 0
+
+
+  @pytest.mark.parametrize(
+      "values",
+      [
+          (float("nan"), 0.0, 0.0),
+          (0.0, float("inf"), 0.0),
+          (0.0, 0.0, float("-inf")),
+          (32.768, 0.0, 0.0),
+          (0.0, -32.769, 0.0),
+          (0.0, 0.0, 32.768),
+          (None, 0.0, 0.0),
+      ],
+  )
+  def test_invalid_values_are_rejected_not_clamped(values):
+      source = FakeDriveSource(T0)
+      writer = _writer(source)
+      assert writer.set_cmd_vel(0.1, 0.0, 0.0, now_ns=T0) is True
+      assert writer.set_cmd_vel(*values, now_ns=T0) is False
+      # The earlier valid command was cleared too, and zero is written instead.
+      assert writer.tick(now_ns=T0 + MS) == drive.ZERO
+      assert source.sent == [drive.ZERO]
+      assert writer.health().rejected_count == 1
+
+
+  def test_deadman_discards_expired_command():
+      source = FakeDriveSource(T0)
+      writer = _writer(source)
+      writer.set_cmd_vel(0.1, 0.0, 0.0, now_ns=T0)
+      assert writer.tick(now_ns=T0 + 249 * MS) == (0.1, 0.0, 0.0)
+      assert writer.tick(now_ns=T0 + 251 * MS) == drive.ZERO
+      # Discarded, not merely zeroed: it never runs again, even with a "valid" clock.
+      assert writer.tick(now_ns=T0 + 100 * MS) == drive.ZERO
+      assert writer.tick(now_ns=T0 + 252 * MS) == drive.ZERO
+
+
+  def test_new_command_keeps_deadman_alive():
+      source = FakeDriveSource(T0)
+      writer = _writer(source)
+      writer.set_cmd_vel(0.1, 0.0, 0.0, now_ns=T0)
+      writer.set_cmd_vel(0.1, 0.0, 0.0, now_ns=T0 + 200 * MS)
+      assert writer.tick(now_ns=T0 + 400 * MS) == (0.1, 0.0, 0.0)
+
+
+  def test_missing_telemetry_forces_zero_and_discards_command():
+      source = FakeDriveSource(T0)
+      source.latest = None
+      writer = _writer(source)
+      writer.set_cmd_vel(0.1, 0.0, 0.0, now_ns=T0)
+      assert writer.tick(now_ns=T0 + MS) == drive.ZERO
+      source.latest = SimpleNamespace(t_ns=T0 + MS, flag_stop=0)
+      assert writer.tick(now_ns=T0 + 2 * MS) == drive.ZERO
+
+
+  def test_stale_telemetry_forces_zero_and_discards_command():
+      source = FakeDriveSource(5_000_000_000)
+      writer = _writer(source, deadman_s=5.0)
+      writer.set_cmd_vel(0.05, 0.0, 0.0, now_ns=5_000_000_000)
+      assert writer.tick(now_ns=5_100_000_000) == (0.05, 0.0, 0.0)
+      # 0.6 s old telemetry is stale (limit 0.5 s).
+      assert writer.tick(now_ns=5_600_000_000) == drive.ZERO
+      # Fresh telemetry must not revive the discarded command.
+      source.latest = SimpleNamespace(t_ns=5_600_000_000, flag_stop=0)
+      assert writer.tick(now_ns=5_700_000_000) == drive.ZERO
+
+
+  def test_flag_stop_forces_zero_and_discards_command():
+      source = FakeDriveSource(T0)
+      writer = _writer(source)
+      writer.set_cmd_vel(0.1, 0.0, 0.0, now_ns=T0)
+      source.latest = SimpleNamespace(t_ns=T0, flag_stop=1)
+      assert writer.tick(now_ns=T0 + MS) == drive.ZERO
+      source.latest = SimpleNamespace(t_ns=T0, flag_stop=0)
+      assert writer.tick(now_ns=T0 + 2 * MS) == drive.ZERO
+
+
+  def test_default_clock_is_monotonic():
+      source = FakeDriveSource(time.monotonic_ns())
+      writer = _writer(source, deadman_s=60.0, telemetry_timeout_s=60.0)
+      writer.set_cmd_vel(0.05, 0.0, 0.0)
+      assert writer.tick() == (0.05, 0.0, 0.0)
+      # A system-clock (epoch) timestamp is not comparable to monotonic time.
+      source.latest = SimpleNamespace(t_ns=time.time_ns(), flag_stop=0)
+      writer.set_cmd_vel(0.05, 0.0, 0.0)
+      assert writer.tick() == drive.ZERO
+
+
+  def test_clear_discards_command():
+      source = FakeDriveSource(T0)
+      writer = _writer(source)
+      writer.set_cmd_vel(0.1, 0.0, 0.0, now_ns=T0)
+      writer.clear()
+      assert writer.tick(now_ns=T0 + MS) == drive.ZERO
+
+
+  def test_set_cmd_vel_does_not_block_on_slow_serial_write():
+      source = BlockingSource(T0)
+      writer = _writer(source)
+      writer.set_cmd_vel(0.1, 0.0, 0.0, now_ns=T0)
+      results: list = []
+
+      def run_tick() -> None:
+          results.append(writer.tick(now_ns=T0 + MS))
+
+      ticker = threading.Thread(target=run_tick)
+      finished = threading.Event()
+
+      def probe() -> None:
+          writer.set_cmd_vel(0.2, 0.0, 0.0, now_ns=T0 + 2 * MS)
+          writer.health()
+          finished.set()
+
+      try:
+          ticker.start()
+          assert source.entered.wait(2.0)  # tick is now stuck inside send_velocity
+          thread = threading.Thread(target=probe)
+          thread.start()
+          thread.join(1.0)
+          assert finished.is_set(), "set_cmd_vel/health blocked while a write was in progress"
+      finally:
+          source.release.set()
+          ticker.join(2.0)
+      assert results == [(0.1, 0.0, 0.0)]
+      assert writer.tick(now_ns=T0 + 3 * MS) == (0.2, 0.0, 0.0)
+
+
+  def test_write_error_is_recorded_and_old_command_is_not_replayed():
+      source = FakeDriveSource(T0)
+      writer = _writer(source)
+      writer.set_cmd_vel(0.1, 0.0, 0.0, now_ns=T0)
+      source.fail_always = True
+      assert writer.tick(now_ns=T0 + 10 * MS) is None
+      health = writer.health()
+      assert health.healthy is False
+      assert health.error_count == 1
+      assert health.last_error == "OSError: port gone"
+      source.fail_always = False
+      # Recovered, still inside the deadman window, but the command was discarded.
+      assert writer.tick(now_ns=T0 + 20 * MS) == drive.ZERO
+      assert source.sent == [drive.ZERO]
+      health = writer.health()
+      assert health.healthy is True
+      assert health.last_write_ns == T0 + 20 * MS
+      assert health.error_count == 1
+      writer.set_cmd_vel(0.2, 0.0, 0.0, now_ns=T0 + 30 * MS)
+      assert writer.tick(now_ns=T0 + 40 * MS) == (0.2, 0.0, 0.0)
+
+
+  def test_command_set_during_failed_write_is_kept():
+      source = FakeDriveSource(T0)
+      writer = _writer(source)
+      writer.set_cmd_vel(0.1, 0.0, 0.0, now_ns=T0)
+
+      def inject() -> None:
+          source.during_send = None
+          writer.set_cmd_vel(0.3, 0.0, 0.0, now_ns=T0 + 15 * MS)
+
+      source.during_send = inject
+      source.fail_always = True
+      assert writer.tick(now_ns=T0 + 10 * MS) is None
+      source.fail_always = False
+      assert writer.tick(now_ns=T0 + 20 * MS) == (0.3, 0.0, 0.0)
+
+
+  def test_loop_survives_write_errors_and_stop_writes_final_zero():
+      source = FakeDriveSource(T0)
+      source.fail_first = 2
+      writer = drive.CmdVelWriter(source, period_s=0.001, retry_s=0.001)
+      writer.start()
+      try:
+          assert source.wrote.wait(2.0)
+          assert writer.health().running is True
+      finally:
+          assert writer.stop() is True
+      assert source.sent[-1] == drive.ZERO
+      assert all(item == drive.ZERO for item in source.sent)
+      health = writer.health()
+      assert health.running is False
+      assert health.healthy is True
+      assert health.error_count == 2
+      assert health.last_error == "OSError: port gone"
+
+
+  def test_stop_tolerates_failing_final_zero():
+      source = FakeDriveSource(T0)
+      source.fail_always = True
+      writer = _writer(source)
+      assert writer.stop() is False
+      health = writer.health()
+      assert health.error_count == 1
+      assert health.last_error == "OSError: port gone"
+
+
+  @pytest.mark.parametrize(
+      "kwargs",
+      [
+          {"deadman_s": 0},
+          {"deadman_s": -1.0},
+          {"deadman_s": float("nan")},
+          {"telemetry_timeout_s": float("inf")},
+          {"period_s": 0},
+      ],
+  )
+  def test_constructor_rejects_bad_timing(kwargs):
+      with pytest.raises(ValueError):
+          drive.CmdVelWriter(FakeDriveSource(T0), **kwargs)
+
+
+  def test_initial_health():
+      writer = drive.CmdVelWriter(FakeDriveSource(T0))
+      health = writer.health()
+      assert health == drive.WriterHealth(
+          running=False,
+          healthy=False,
+          error_count=0,
+          last_error=None,
+          rejected_count=0,
+          last_write_ns=None,
+      )
+  ```
+
+  **Bước 3. Kiểm tra (chạy từ `/home/vth/ws/mecanum_base`, báo output từng lệnh).**
+  1. `.venv/bin/pytest -v` -> mong đợi `45 passed`, 0 failed, 0 error (15 test T02 + 29 test mới ở `robot/tests/test_robot.py` + 1 ở `app/server/tests/test_server.py`). Nếu tổng khác 45 nhưng không có fail, báo số thực tế và không sửa; nếu có fail, trả `BLOCKED` kèm tên test và lỗi, không tự sửa thiết kế.
+  2. `.venv/bin/python -c "import robot_agent.drive as d; print(sorted(n for n in dir(d) if n[0].isupper()))"` -> in có `CmdVelWriter`, `WriterHealth`, `ZERO`, và không có `KeyboardDrive`.
+  3. `grep -nE "KeyboardDrive|DIRECTIONS|time_ns|time\.time\(|min\(|max\(" robot/robot_agent/drive.py` -> không có dòng nào (exit 1).
+  4. `grep -rn "KeyboardDrive" robot app` -> không có kết quả (exit 1).
+  5. `grep -c "time.sleep" robot/tests/test_robot.py` -> `0`.
+  6. `.venv/bin/pytest robot/tests/test_robot.py -k "writer or deadman or telemetry or loop or stop or blocking or block or error or invalid or clear or health or clock or boundary or limit or flag or constructor or command" -v` -> các test mới đều pass; toàn bộ chạy dưới 5 giây.
+
+  **Trả về:** danh sách file đã sửa, output nguyên văn của 6 lệnh, mọi điểm bạn phải dừng. Không commit.
+
+  **Mâu thuẫn/điểm mở cho Opus (Sonnet nêu, Haiku không xử lý):**
+  1. task.md T03 "Đạt khi" ghi `MOTION_ENABLED=false`, spec SAF-02 ghi `ROBOT_MOTION_ENABLED`. Không mâu thuẫn thực chất: T03 chỉ có tham số constructor `motion_enabled` (mặc định `False`); việc đọc biến môi trường `ROBOT_MOTION_ENABLED` thuộc T04 (`config.py`).
+  2. SAF-03(c) ("robot mất link thì tự ghi 0") liệt kê T03 nhưng việc nối "mất link" vào writer là của T04: T03 cung cấp `clear()` và deadman 250 ms; T04 phải gọi `clear()` khi WS đóng (test "mất link thì writer về 0" của T04).
+  3. Spec không nói đúng 250 ms/500 ms thuộc phía nào; Work order chọn "đúng ngưỡng vẫn còn hạn, cũ hơn ngưỡng thì loại" (khác code cũ loại ở `>=`). Test tránh đúng biên (249 ms/251 ms).
+  4. Hợp đồng ngoài spec, do Work order chốt cho T04/T06 dùng: `set_cmd_vel` trả `bool`; `tick` trả lệnh đã ghi hoặc `None`; `stop()` trả `bool`; `health()` trả `WriterHealth(running, healthy, error_count, last_error, rejected_count, last_write_ns)` với `healthy` là "lần ghi gần nhất thành công" (ban đầu `False`). Tham số thêm `retry_s=0.2` và `join_timeout_s=2.0` ngoài danh sách của yêu cầu.
+  5. Constructor cũ giới hạn timeout (key ≤ 0.5 s, telemetry ≤ 1 s) cùng tốc độ; bản mới chỉ yêu cầu timing dương và hữu hạn (không phải giới hạn tốc độ nên không vi phạm SAF-04, nhưng là thay đổi hành vi).
+  6. `AstraSSource` và `hardware.py` không đổi; `drive.py` import `encode_stm32_velocity_command` từ `.hardware` (import tương đối trong gói `robot_agent`).
+
 
 ### T04 — WS server, cấu hình, mô phỏng
 - Trạng thái: TODO · Plan: P1 · Phụ thuộc: T03
