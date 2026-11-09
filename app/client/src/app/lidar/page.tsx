@@ -33,7 +33,7 @@ export default function LidarPage() {
           <AlertDescription>
             {status === "stale"
               ? "Quá 1 giây không nhận được scan mới. Hình vẽ là scan cuối cùng, đã mờ đi."
-              : "Chưa kết nối tới app server hoặc chưa nhận scan LiDAR nào."}
+              : "Chưa kết nối tới máy điều khiển hoặc chưa nhận scan LiDAR nào."}
           </AlertDescription>
         </Alert>
       ) : null}

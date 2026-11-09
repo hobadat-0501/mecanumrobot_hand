@@ -9095,3 +9095,10 @@ Trạng thái: `TODO → ORDERED → CODED → PASS → MERGED` hoặc `BLOCKED`
 | P3 | T07, T08 |
 | P4 | T09, T10, T11, T12, T13 |
 | P5 | T14, T15 |
+
+## Thay đổi sau T14 (UI)
+
+- Trang động học thuận: ô nhập A, B, C, D; vận tốc dài và quãng đường tính toán đổi tức thời; quãng đường thực tế đo bằng `MotionMeter` từ odometry (FR-04).
+- Bộ bám đích (PHY-6): bỏ tham số và giới hạn gia tốc (do STM đảm nhiệm), chỉ còn P-law cắt theo `vCruise`/`wzCruise`. Các đoạn mã và test gia tốc trong T07/T11 ở trên là lịch sử, đã bị thay thế.
+- Nút Dừng/Hủy ở hai trang chạy được thay bằng phím `Space` (FR-02): `decideKeyDown("Space")` → `cancel` → `cancelRun()`.
+- Trang động học ngược: một khối "Đích và thời gian" (đích + thời gian + nút Chạy) đặt ngang với khối "Tiến độ"; bỏ khối "Lệnh đang gửi", thay bằng "Tốc độ tính được" (bốn bánh, vx, vy, |v|, wz) suy ra từ quãng đường/thời gian bằng `planInverse`. Bỏ ô nhập tốc độ chạy/quay. Chữ hiển thị trên web không còn mã nội bộ (cmd_vel, PHY, A-4, app server).

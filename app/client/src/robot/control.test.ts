@@ -151,7 +151,8 @@ describe("decideKeyDown (FR-02)", () => {
 
   it("phím khác bị bỏ qua", () => {
     expect(decideKeyDown("KeyZ", NO_MODIFIER)).toBeNull();
-    expect(decideKeyDown("Space", NO_MODIFIER)).toBeNull();
+    expect(decideKeyDown("Space", NO_MODIFIER)).toEqual({ kind: "cancel" });
+    expect(decideKeyDown("Space", { typing: true, modifier: false })).toBeNull();
   });
 });
 
