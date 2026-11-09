@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any, Callable, Dict, Optional
 
 from websockets.asyncio.client import connect
@@ -41,6 +42,7 @@ class RobotLink:
         ping_interval_s: float = 2.0,
         ping_timeout_s: float = 2.0,
         open_timeout_s: float = 3.0,
+        rtt_interval_s: float = 1.0,
     ) -> None:
         self._url = url
         self._headers = {"Authorization": "Bearer " + token}
@@ -58,6 +60,8 @@ class RobotLink:
         self._pending: Optional[str] = None
         self._wake = asyncio.Event()
         self._last_seq = 0
+        self._rtt_s: Optional[float] = None
+        self._rtt_interval_s = rtt_interval_s
 
     @property
     def connected(self) -> bool:
@@ -65,12 +69,8 @@ class RobotLink:
 
     @property
     def latency_s(self) -> Optional[float]:
-        """Round-trip time of the last WebSocket ping, or None when unknown."""
-        ws = self._ws
-        if ws is None:
-            return None
-        value = getattr(ws, "latency", 0.0)
-        return float(value) if value and value > 0 else None
+        """Round-trip time of the last measured ping, or None when unknown."""
+        return self._rtt_s if self._ws is not None else None
 
     def send_cmd_vel(self, seq: int, vx: float, vy: float, wz: float) -> bool:
         """Queue the newest cmd_vel (wire units), replacing any unsent one.
@@ -127,19 +127,37 @@ class RobotLink:
         self._pending = None
         self._wake.clear()
         self._connected = True
+        self._rtt_s = None
         sender = asyncio.ensure_future(self._send_loop(ws))
         receiver = asyncio.ensure_future(self._receive_loop(ws))
+        pinger = asyncio.ensure_future(self._rtt_loop(ws))
         try:
             self._notify(self._on_connect)
             await asyncio.wait({sender, receiver}, return_when=asyncio.FIRST_COMPLETED)
         finally:
             self._connected = False
             self._ws = None
+            self._rtt_s = None
+            pinger.cancel()
             self._pending = None
             self._notify(self._on_disconnect)
             sender.cancel()
             receiver.cancel()
-            await asyncio.gather(sender, receiver, return_exceptions=True)
+            await asyncio.gather(sender, receiver, pinger, return_exceptions=True)
+
+    async def _rtt_loop(self, ws: Any) -> None:
+        """Measure the round trip with an explicit ping (the keepalive value is unreliable)."""
+        while True:
+            try:
+                started = time.monotonic()
+                pong = await ws.ping()
+                await asyncio.wait_for(pong, timeout=self._ping_timeout_s)
+                self._rtt_s = time.monotonic() - started
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._rtt_s = None
+            await asyncio.sleep(self._rtt_interval_s)
 
     async def _send_loop(self, ws: Any) -> None:
         while True:

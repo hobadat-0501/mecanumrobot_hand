@@ -1553,3 +1553,25 @@ async def test_api_docs_are_disabled(robot, path):
         async with httpx.AsyncClient() as client:
             response = await client.get(app.http_url + path)
         assert response.status_code == 404
+
+
+async def test_robot_link_measures_rtt_against_the_real_robot_server(robot):
+    link = RobotLink(
+        robot.url,
+        LINK_TOKEN,
+        on_state=lambda state: None,
+        backoff_initial_s=0.02,
+        rtt_interval_s=0.05,
+    )
+    task = asyncio.ensure_future(link.run())
+    try:
+        for _ in range(150):
+            if link.latency_s is not None:
+                break
+            await asyncio.sleep(0.02)
+        assert link.latency_s is not None
+        assert 0.0 < link.latency_s < 1.0
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert link.latency_s is None

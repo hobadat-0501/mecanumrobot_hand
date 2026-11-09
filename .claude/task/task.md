@@ -7770,11 +7770,12 @@ Trạng thái: `TODO → ORDERED → CODED → PASS → MERGED` hoặc `BLOCKED`
 ## P5 — Kiểm chứng
 
 ### T14 — Kiểm thử toàn tuyến trên mô phỏng
-- Trạng thái: CODED · Plan: P5 · Phụ thuộc: T10, T11, T12, T13
+- Trạng thái: MERGED · Plan: P5 · Phụ thuộc: T10, T11, T12, T13
 - Spec: SAF-01, SAF-02, SAF-03, SAF-04, SAF-05, SAF-07, NFR-02, NFR-04, NFR-06
 - Gia cố từ review T09: `LatencyTracker.ack` khớp đúng `seq === last_cmd_seq` thay vì mọi `seq <=` để tránh mẫu sai sau khi tải lại trang hoặc có hai tab lái. (Quyết định: không đưa `src` vào state; nguồn lệnh tính ở client.)
 - Gia cố từ các review trước: bọc thân vòng lặp `broadcast_loop` và `watchdog_loop` trong try/except có log để lỗi một vòng không làm chết vòng lặp; chỉ chuyển tiếp `health`, `charge` sau khi kiểm tra kiểu và giá trị hữu hạn; test `telemetry.clear_robot()` khi mất link; `_authorized` của robot trả 401 thay vì lỗi 500 với header hỏng.
 - Việc: chạy toàn bộ test, lint, build; `app/client/src` không chứa hệ số; bắt payload WS chứng minh web không nhận đơn vị wire; ngắt từng chặng và đo thời gian tự dừng; kiểm tra trên trình duyệt thật.
+- Sửa thêm sau review: RTT trang hệ thống luôn trống với robot thật vì `ws.latency` của keepalive không có giá trị; `RobotLink` nay đo RTT bằng ping tường minh mỗi giây (test với `RobotServer` thật). Theo dõi ở T15: lỗi ghi một lần của writer lúc robot vừa khởi động (`stm is not running`) và `scan_loop` chưa bọc try/except như hai vòng còn lại.
 - Đạt khi: tất cả qua, kết quả đo ghi vào mục này.
 - Work order:
 
@@ -9059,21 +9060,23 @@ Trạng thái: `TODO → ORDERED → CODED → PASS → MERGED` hoặc `BLOCKED`
 
   ### Kết quả đo
 
-  _(Sonnet điền sau khi đối chứng; Haiku không chạm khối này.)_
+  _(Sonnet đã điền 2026-11-09: pytest `-s` chạy một lần sạch, có lần chạy thêm với tải CPU; trình duyệt là Chrome headless 157 thật, robot mô phỏng `ROBOT_SIMULATE=true ROBOT_MOTION_ENABLED=true` có ghi mọi lệnh xuống STM32 giả, app server thật, `next start`.)_
 
   | Phép đo | Mốc | Kết quả pytest `-s` | Kết quả trình duyệt / ghi chú |
   |---|---|---|---|
-  | Vòng lệnh `cmd_vel` → `last_cmd_seq` p95 (60 lệnh) | ≤ 150 ms | … ms | … ms (trang `/system`) |
-  | Operator ngắt → 0 tại STM32 | ≤ 300 ms | … ms | … |
-  | Watchdog app server (lệnh cuối → 0) | ≤ 550 ms | … ms | … |
-  | Cắt link robot → 0 | ≤ 300 ms | … ms | … |
-  | Disarm → 0 | ≤ 300 ms | … ms | … |
-  | Deadman robot, bên gửi đứng im (lệnh cuối → 0) | ≤ 550 ms | … ms | … |
-  | Bên gửi bị kill → 0 | ≤ 300 ms | … ms | … (kill -9 app server) |
-  | SAF-05 cờ dừng / telemetry cũ → 0 | ≤ 500 ms | … / … ms | … |
-  | SAF-04 vượt int16 → 0, không kẹp | ≤ 500 ms | … ms | … |
-  | Số test | 239 Python, 147 vitest | … / … | … |
-  | Mở web từ origin lạ | 403 | … | … |
+  | Vòng lệnh `cmd_vel` → `last_cmd_seq` p95 (60 lệnh) | ≤ 150 ms | p50 29, p95 58, max 59 ms | 49 ms (1280 px) và 51 ms (390 px), 100 mẫu, trang `/system`. RTT robot hiện "—" (xem ghi chú dưới bảng) |
+  | Operator ngắt → 0 tại STM32 | ≤ 300 ms | 47, 48, 4 ms (trung vị 47) | Đóng tab đang giữ `W`: 10 ms; tab xem hiện disarm, vận tốc đo về 0 |
+  | Watchdog app server (lệnh cuối → 0) | ≤ 550 ms | 295, 303, 305 ms (trung vị 303; lần có tải 342 ms) | không đo được từ trình duyệt |
+  | Cắt link robot → 0 | ≤ 300 ms | 44, 50, 6 ms (trung vị 44) | Kill robot khi giữ `W`: thanh trạng thái "Robot: mất link", DISARM; robot mở lại, `W` vẫn giữ: không có lệnh nào chạy lại |
+  | Disarm → 0 | ≤ 300 ms | 46, 49, 2 ms (trung vị 46) | `X` 49 ms, `Esc` 43 ms, cả hai disarm |
+  | Deadman robot, bên gửi đứng im (lệnh cuối → 0) | ≤ 550 ms | 296, 293, 296 ms (trung vị 296) | không đo được từ trình duyệt |
+  | Bên gửi bị kill → 0 | ≤ 300 ms | 47, 44, 48 ms (trung vị 47) | kill -9 app server khi lái: 47 ms; app chạy lại, web tự nối lại, hiện DISARM, `W` vẫn giữ nhưng robot không chạy lại |
+  | SAF-05 cờ dừng / telemetry cũ → 0 | ≤ 500 ms | 45 / 37 ms | không đo được từ trình duyệt |
+  | SAF-04 vượt int16 → 0, không kẹp | ≤ 500 ms | 48 ms | không đo được từ trình duyệt (10 m/s đến robot đúng 5.29, kiểm bằng test) |
+  | Số test | 239 Python, 147 vitest | 239 (ba lần liên tiếp, đều qua) / 147 | tsc, eslint, build (7 route) qua |
+  | Mở web từ origin lạ | 403 | 403 (test) | `http://127.0.0.1:18193` (không có trong `APP_ALLOWED_ORIGINS`): "Mất kết nối", lỗi handshake trong Console, không nhận frame nào |
+
+  Ghi chú trình duyệt: thả phím 51 ms, mất focus 39 ms, tab ẩn 36 ms đều ra lệnh 0. Gõ 0.2 m/s: web thấy 0.200 (vận tốc đo 0.2003), robot mô phỏng nhận 0.10582 (= 0.2/hệ số). Qua 6 trang bằng điều hướng, phím vẫn lái ở cả 6 trang. 336 frame văn bản và 160 frame nhị phân nhận được: không có chuỗi `1.89` hay `0.529`, không có số nào gần 0.1058. `/docs`, `/redoc`, `/openapi.json` đều 404. Không có lỗi Console ngoài lỗi nối lại khi app server tắt. Header `Authorization` lặp hoặc có NUL: 401 hoặc đóng kết nối, không bao giờ 500. Hai điều chưa đạt yêu cầu (h) hoặc đáng ghi: `rtt_ms` luôn `null` trên robot thật của mô phỏng nên `/system` hiện RTT "—" (với `websockets 16.1.1`, `connection.latency` của link tới `RobotServer` giữ 0.0, còn máy chủ thử đơn giản thì có số); khi robot khởi động, bộ ghi báo một lỗi "stm is not running" (đếm lỗi ghi = 1) vì ghi trước khi nguồn STM chạy.
 
 ### T15 — Thử trên Jetson (cần người dùng)
 - Trạng thái: TODO · Plan: P5 · Phụ thuộc: T14, Jetson online
