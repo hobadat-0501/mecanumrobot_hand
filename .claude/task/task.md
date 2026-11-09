@@ -596,7 +596,7 @@ Trạng thái: `TODO → ORDERED → CODED → PASS → MERGED` hoặc `BLOCKED`
   5. FIX-7 nói cả "dt", nhưng hiện không có phép tính dt nào dùng đồng hồ hệ thống ngoài tuổi telemetry; `scan_rate_hz` đã dùng `time.monotonic()`.
 
 ### T03 — Writer cmd_vel
-- Trạng thái: CODED · Plan: P1 · Phụ thuộc: T02
+- Trạng thái: MERGED · Plan: P1 · Phụ thuộc: T02
 - Spec: FIX-3, FIX-4, FIX-5, FIX-6, SAF-02, SAF-03, SAF-04, SAF-05, SAF-06
 - File: `robot/robot_agent/drive.py`, `robot/tests/test_robot.py`
 - Đạt khi: test bao phủ `set_cmd_vel` không chặn khi serial chậm, deadman 250 ms, không kẹp tốc độ, giá trị ngoài int16 bị loại và ghi 0, telemetry cũ và cờ dừng ép 0, tự phục hồi sau lỗi ghi mà không chạy lại lệnh cũ, `MOTION_ENABLED=false` chỉ ghi 0.
