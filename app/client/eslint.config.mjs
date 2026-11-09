@@ -13,6 +13,11 @@ const eslintConfig = defineConfig([
     "build/**",
     "next-env.d.ts",
   ]),
+  // File shadcn sinh sẵn gọi setState trong effect; luật mới của React 19 chặn việc đó.
+  {
+    files: ["src/components/ui/**", "src/hooks/**"],
+    rules: { "react-hooks/set-state-in-effect": "off" },
+  },
 ]);
 
 export default eslintConfig;
