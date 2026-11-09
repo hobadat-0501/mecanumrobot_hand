@@ -189,7 +189,7 @@ export default function Page() {
       <div>
         <h1 className="text-xl font-semibold tracking-tight">Động học ngược</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Chọn đích và thời gian: tốc độ thân và tốc độ bốn bánh được tính từ quãng đường chia thời gian. Bấm Space hoặc phím di chuyển để dừng khẩn (xe dừng và disarm).
+          Chọn đích và thời gian: tốc độ thân và tốc độ bốn bánh được tính từ quãng đường chia thời gian. Bấm Space để dừng khẩn (xe dừng và disarm).
         </p>
       </div>
 
