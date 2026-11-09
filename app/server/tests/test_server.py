@@ -298,6 +298,7 @@ def test_token_matches():
     assert token_matches(None, "secret") is False
     assert token_matches(123, "secret") is False
     assert token_matches("sécret", "secret") is False
+    assert token_matches("\ud800", "secret") is False
 
 
 def test_token_compare_is_constant_time():
@@ -372,3 +373,12 @@ def test_default_clock_is_monotonic():
 
     default = inspect.signature(ControlSession.__init__).parameters["clock"].default
     assert default is time.monotonic
+
+
+@pytest.mark.parametrize("field", ["vx", "vy", "wz"])
+@pytest.mark.parametrize("huge", [10**330, 10**400])
+def test_validate_cmd_vel_rejects_overflowing_int(field, huge):
+    msg = {"seq": 1, "vx": 0.0, "vy": 0.0, "wz": 0.0}
+    msg[field] = huge
+    with pytest.raises(ValueError):
+        validate_cmd_vel(msg)

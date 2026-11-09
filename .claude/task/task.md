@@ -1807,6 +1807,40 @@ Trạng thái: `TODO → ORDERED → CODED → PASS → MERGED` hoặc `BLOCKED`
   - SAF-03b (watchdog, disconnect) không có trong `Đạt khi` của T05 nhưng nằm trong lõi nên được test ở đây; T06 gọi `watchdog_tripped()` định kỳ và phát `cmd_vel` 0.
   - Định tuyến `hello`/`arm`, FastAPI, robot link thuộc T06. `connect()` kiểm Origin và đăng ký viewer; T06 gọi sau khi đọc header Origin.
 
+  **Vòng sửa 1 (từ review của Sonnet, kết quả FAIL)**
+
+  Chỉ sửa `app/server/app_server/control.py` và `app/server/tests/test_server.py`.
+
+  1. Trong `token_matches`, thay dòng cuối `return hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8"))` bằng:
+     ```python
+     try:
+         return hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8"))
+     except UnicodeEncodeError:
+         return False
+     ```
+  2. Thay toàn bộ hàm `_finite_number` bằng:
+     ```python
+     def _finite_number(value: Any) -> bool:
+         if not isinstance(value, (int, float)) or isinstance(value, bool):
+             return False
+         try:
+             return math.isfinite(value)
+         except OverflowError:
+             return False
+     ```
+  3. Trong `test_token_matches` của `test_server.py`, thêm dòng cuối hàm: `assert token_matches("\ud800", "secret") is False`.
+  4. Thêm vào cuối `test_server.py`:
+     ```python
+     @pytest.mark.parametrize("field", ["vx", "vy", "wz"])
+     @pytest.mark.parametrize("huge", [10**330, 10**400])
+     def test_validate_cmd_vel_rejects_overflowing_int(field, huge):
+         msg = {"seq": 1, "vx": 0.0, "vy": 0.0, "wz": 0.0}
+         msg[field] = huge
+         with pytest.raises(ValueError):
+             validate_cmd_vel(msg)
+     ```
+  5. Kiểm tra: `/home/vth/ws/mecanum_base/.venv/bin/pytest app/server` phải báo `67 passed`; `/home/vth/ws/mecanum_base/.venv/bin/pytest` phải báo `111 passed`.
+
 ### T06 — Link robot, telemetry, WS operator
 - Trạng thái: TODO · Plan: P2 · Phụ thuộc: T04, T05
 - Spec: FR-08, FR-12, SAF-01, SAF-03, PROTO-1, PROTO-2, PHY-7, NFR-03

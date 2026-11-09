@@ -27,7 +27,10 @@ def token_matches(supplied: Any, expected: str) -> bool:
     """Constant-time token compare. Empty expected or non-str supplied never matches."""
     if not isinstance(supplied, str) or not expected:
         return False
-    return hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8"))
+    try:
+        return hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8"))
+    except UnicodeEncodeError:
+        return False
 
 
 def origin_allowed(origin: Any, allowed: Iterable[str]) -> bool:
@@ -36,11 +39,12 @@ def origin_allowed(origin: Any, allowed: Iterable[str]) -> bool:
 
 
 def _finite_number(value: Any) -> bool:
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(value)
-    )
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def validate_cmd_vel(msg: Any) -> Tuple[int, float, float, float]:
