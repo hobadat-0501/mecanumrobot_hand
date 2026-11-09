@@ -7733,9 +7733,9 @@ Trạng thái: `TODO → ORDERED → CODED → PASS → MERGED` hoặc `BLOCKED`
 ## P4 — Các trang
 
 ### T09 — Trang tổng quan và hệ thống
-- Trạng thái: TODO · Plan: P4 · Phụ thuộc: T08
+- Trạng thái: CODED · Plan: P4 · Phụ thuộc: T08
 - Spec: FR-08, FR-09, FR-11, FR-12
-- File: `app/client/src/app/page.tsx`, `app/client/src/app/system/page.tsx`, `app/client/src/components/robot/{panels,charts}.tsx`
+- File: `app/client/src/app/page.tsx`, `app/client/src/app/system/page.tsx`, `app/client/src/components/robot/{panels,charts}.tsx`, `app/client/src/components/robot/app-shell.tsx` (cờ mất dữ liệu, SOURCE_LABEL chuyển sang panels), `app/client/src/robot/store.ts` (quỹ đạo, độ trễ, stale), `app/client/src/robot/{telemetry,telemetry.test}.ts`
 - Đạt khi: hiển thị đủ số liệu FR-08, RTT, độ trễ vòng lệnh, quỹ đạo, reset odometry hoạt động.
 - Work order: _(Sonnet điền)_
 

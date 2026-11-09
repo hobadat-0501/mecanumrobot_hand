@@ -18,6 +18,8 @@ import type {
 } from "./control";
 import { encodeMessage, parseServerMessage, resolveWsUrl } from "./protocol";
 import type { ClientMessage, Role, StateMsg } from "./protocol";
+import { HistoryBuffer, LatencyTracker, STALE_MS, isStale } from "./telemetry";
+import type { LatencyStats } from "./telemetry";
 
 export const BACKOFF_INITIAL_MS = 500;
 export const BACKOFF_MAX_MS = 5000;
@@ -36,6 +38,8 @@ export interface ShellSnapshot {
   conn: Connection;
   /** Đã nhận ít nhất một state trên kết nối hiện tại. */
   hasState: boolean;
+  /** Socket mở nhưng quá STALE_MS không có state: coi như mất dữ liệu (chỉ để hiển thị). */
+  stale: boolean;
   robotLink: boolean;
   armed: boolean;
   role: Role | null;
@@ -48,6 +52,7 @@ export interface ShellSnapshot {
 const INITIAL_SHELL: ShellSnapshot = {
   conn: "closed",
   hasState: false,
+  stale: false,
   robotLink: false,
   armed: false,
   role: null,
@@ -71,6 +76,10 @@ let operatorCode = "";
 let telemetry: StateMsg | null = null;
 let telemetryAt = Number.NEGATIVE_INFINITY;
 let shell: ShellSnapshot = INITIAL_SHELL;
+/** Quỹ đạo gần đây (FR-12): vòng đệm ngoài React, trang vẽ bằng canvas. */
+export const trajectory = new HistoryBuffer();
+const latency = new LatencyTracker();
+const STALE_CHECK_MS = 250;
 const telemetryListeners = new Set<() => void>();
 const shellListeners = new Set<() => void>();
 
@@ -90,6 +99,11 @@ export function getTelemetry(): StateMsg | null {
 /** performance.now() lúc nhận state gần nhất; -Infinity nếu chưa có. */
 export function getTelemetryAt(): number {
   return telemetryAt;
+}
+
+/** Độ trễ vòng lệnh đo ở client (FR-11, NFR-02). */
+export function getLatencyStats(): LatencyStats {
+  return latency.stats();
 }
 
 function subscribeShell(listener: () => void): () => void {
@@ -129,6 +143,10 @@ function publishShell(): void {
   const next: ShellSnapshot = {
     conn,
     hasState: telemetry !== null,
+    stale:
+      conn === "open" &&
+      telemetry !== null &&
+      isStale(performance.now() - telemetryAt, STALE_MS),
     robotLink: telemetry?.link.robot ?? false,
     armed: telemetry?.session.armed ?? false,
     role: telemetry?.session.role ?? null,
@@ -140,6 +158,7 @@ function publishShell(): void {
   const same =
     next.conn === shell.conn &&
     next.hasState === shell.hasState &&
+    next.stale === shell.stale &&
     next.robotLink === shell.robotLink &&
     next.armed === shell.armed &&
     next.role === shell.role &&
@@ -168,6 +187,7 @@ function sendCmd(out: Output): void {
   // NFR-03: socket đang nghẽn thì bỏ lệnh chuyển động này, không dồn hàng đợi; lệnh 0 vẫn đi.
   if (!zero && ws.bufferedAmount > MAX_BUFFERED_BYTES) return;
   seq += 1;
+  latency.sent(seq, performance.now());
   send({
     t: "cmd_vel",
     seq,
@@ -260,6 +280,7 @@ export function setArmed(on: boolean): void {
 
 export function resetOdometry(): void {
   send({ t: "odom_reset" });
+  trajectory.clear();
 }
 
 /** Phím di chuyển nhấn xuống. Bỏ qua khi chưa được phép lái. */
@@ -378,6 +399,8 @@ function connect(): void {
     const couldDrive = canDrive();
     telemetry = msg;
     telemetryAt = performance.now();
+    trajectory.push(msg.pose.x, msg.pose.y, msg.pose.theta);
+    latency.ack(msg.last_cmd_seq, telemetryAt);
     notifyTelemetry();
     if (couldDrive && !canDrive()) haltAll("disarmed");
     else publishShell();
@@ -400,6 +423,9 @@ function connect(): void {
 export function startStore(): void {
   if (started || typeof window === "undefined") return;
   started = true;
+  // Phát hiện treo im lặng: không có sự kiện nào khi state ngừng tới, nên kiểm tra theo chu kỳ.
+  // Chỉ ảnh hưởng hiển thị; publishShell chỉ thông báo khi giá trị đổi.
+  setInterval(publishShell, STALE_CHECK_MS);
   operatorCode = readStoredCode();
   connect();
 }
