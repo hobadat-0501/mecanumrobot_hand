@@ -7747,9 +7747,9 @@ Trạng thái: `TODO → ORDERED → CODED → PASS → MERGED` hoặc `BLOCKED`
 - Work order: _(Sonnet điền)_
 
 ### T11 — Động học ngược
-- Trạng thái: TODO · Plan: P4 · Phụ thuộc: T09
+- Trạng thái: CODED · Plan: P4 · Phụ thuộc: T09
 - Spec: FR-05, FR-06, PHY-6
-- File: `app/client/src/app/kinematics/inverse/page.tsx`
+- File: `app/client/src/app/kinematics/inverse/page.tsx`, `app/client/src/robot/{inverse,inverse.test}.ts`
 - Đạt khi: chọn được kiểu A/B; hiện 4 tốc độ bánh và tiến độ; tới đích trên mô phỏng trong sai số PHY-6; các điều kiện hủy hoạt động.
 - Work order: _(Sonnet điền)_
 
