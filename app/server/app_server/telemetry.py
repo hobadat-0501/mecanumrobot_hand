@@ -1,6 +1,7 @@
 """Telemetry: robot velocity, odometry (PHY-7), build the web `state`.
 
-SAF-01: no scaling anywhere: `vel`, IMU and every other field pass through unchanged.
+SAF-01: only `vel` is multiplied by the calibration scale (the same SPEED_SCALE control.py
+divides by). IMU and every other field pass through unchanged.
 """
 
 from __future__ import annotations
@@ -127,7 +128,8 @@ class Odometry:
 class Telemetry:
     """Latest robot telemetry in web units plus odometry; builds the PROTO-1 `state`."""
 
-    def __init__(self) -> None:
+    def __init__(self, speed_scale: float = 1.0) -> None:
+        self._speed_scale = speed_scale
         self.odometry = Odometry()
         self._clear_robot_fields()
 
@@ -153,7 +155,9 @@ class Telemetry:
         raw_vel = _finite_dict(msg.get("vel"), ("vx", "vy", "wz"))
         self._vel = None
         if raw_vel is not None:
-            self._vel = raw_vel
+            scaled = {key: value * self._speed_scale for key, value in raw_vel.items()}
+            if all(math.isfinite(value) for value in scaled.values()):  # a huge value overflows when scaled
+                self._vel = scaled
         t_ns = msg.get("t_mono_ns")
         if self._vel is not None and isinstance(t_ns, int) and not isinstance(t_ns, bool):
             self.odometry.update(t_ns, self._vel["vx"], self._vel["vy"], self._vel["wz"])

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +25,8 @@ class Settings:
     bind_host: str
     bind_port: int
     allowed_origins: Tuple[str, ...]
+    # Calibration: real speed / speed reported by the STM (measured with a tape measure).
+    speed_scale: float
 
 
 def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
@@ -46,6 +49,13 @@ def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
     if not 1 <= bind_port <= 65535:
         raise ConfigError("APP_BIND_PORT must be in 1..65535")
 
+    try:
+        speed_scale = float(env.get("SPEED_SCALE", "1.0"))
+    except ValueError as exc:
+        raise ConfigError("SPEED_SCALE must be a number") from exc
+    if not math.isfinite(speed_scale) or speed_scale <= 0:
+        raise ConfigError("SPEED_SCALE must be a finite number greater than 0")
+
     origins = tuple(
         o.strip()
         for o in env.get("APP_ALLOWED_ORIGINS", "http://100.119.83.63:3000").split(",")
@@ -58,4 +68,5 @@ def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
         bind_host=env.get("APP_BIND_HOST", "100.119.83.63").strip(),
         bind_port=bind_port,
         allowed_origins=origins,
+        speed_scale=speed_scale,
     )

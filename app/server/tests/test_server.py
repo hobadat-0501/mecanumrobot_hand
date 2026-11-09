@@ -161,11 +161,42 @@ def test_snapshot_holds_the_commanded_velocity():
     assert snap["last_cmd_seq"] == 3
 
 
+def test_speed_scale_divides_commands_and_multiplies_telemetry():
+    s = ControlSession("tok", ["http://x"], FakeClock(), 1.89)
+    s.connect("a", "http://x")
+    s.hello("a", "tok")
+    s.arm("a", True)
+    out = s.handle_cmd_vel("a", cmd(seq=1, vx=1.89, vy=-3.78, wz=0.189))
+    assert out["vx"] == pytest.approx(1.0)
+    assert out["vy"] == pytest.approx(-2.0)
+    assert out["wz"] == pytest.approx(0.1)
+    assert s.snapshot()["cmd"] == {"vx": 1.89, "vy": -3.78, "wz": 0.189}  # web units
+    t = Telemetry(1.89)
+    t.on_robot_state(robot_state(vel=(0.1, 0.0, 0.0)))
+    state = t.build_state(SNAPSHOT, True)
+    assert state["vel"]["vx"] == pytest.approx(0.189)
+    assert state["imu"]["az"] == 9.81  # IMU is not scaled
+    t2 = Telemetry(1.89)
+    t2.on_robot_state(robot_state(vel=(1e308, 0.0, 0.0)))
+    assert t2.build_state(SNAPSHOT, True)["vel"] is None  # overflow when scaled is dropped
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "abc", "nan", "inf"])
+def test_config_rejects_bad_speed_scale(bad):
+    with pytest.raises(ConfigError):
+        load_settings(dict(BASE_ENV, SPEED_SCALE=bad))
+
+
+def test_config_speed_scale_default_and_value():
+    assert load_settings(BASE_ENV).speed_scale == 1.0
+    assert load_settings(dict(BASE_ENV, SPEED_SCALE="1.89")).speed_scale == 1.89
+
+
 def test_no_scaling_code_in_control():
     import inspect
 
     src = inspect.getsource(control)
-    assert "DIVISOR" not in src and "to_wire_units" not in src
+    assert "DIVISOR" not in src and "to_wire_units" not in src and "1.89" not in src
 
 
 # ---- no clamping (SAF-04) ----
