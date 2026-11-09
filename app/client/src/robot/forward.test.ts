@@ -23,6 +23,10 @@ const READY: RunReadiness = {
 const OK_INPUT = { stateAgeS: 0.05, armed: true, keyPressed: false, pose: null };
 
 describe("đọc số nhập", () => {
+  it("giá trị khổng lồ làm tràn tổng thì null", () => {
+    expect(parseWheels(["1e308", "1e308", "1e308", "1e308"])).toBeNull();
+  });
+
   it("rỗng, chữ, vô cực không bao giờ ra NaN", () => {
     for (const t of ["", "  ", "abc", "1e999", "Infinity", "NaN", "1.2.3"]) {
       expect(parseNumber(t)).toBeNull();

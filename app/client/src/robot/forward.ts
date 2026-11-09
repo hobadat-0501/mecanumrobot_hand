@@ -31,7 +31,12 @@ export function parseWheels(texts: readonly string[]): Wheels | null {
   if (texts.length !== 4) return null;
   const v = texts.map(parseNumber);
   if (v.some((x) => x === null)) return null;
-  return [v[0] as number, v[1] as number, v[2] as number, v[3] as number];
+  const w: Wheels = [v[0] as number, v[1] as number, v[2] as number, v[3] as number];
+  // Giá trị hữu hạn nhưng quá lớn có thể làm tràn tổng: không bao giờ phát ra lệnh vô hạn.
+  const b = forwardKinematics(w);
+  if (![b.vx, b.vy, b.wz].every(Number.isFinite)) return null;
+  if (!Number.isFinite(wheelResidual(w))) return null;
+  return w;
 }
 
 export interface Chain {
