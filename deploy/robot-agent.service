@@ -1,0 +1,30 @@
+# systemd unit for the robot agent on the Jetson.
+# NOTE: the real install path on the Jetson is not known yet (confirm in T15). /opt/mecanum_base
+# is a placeholder: adjust WorkingDirectory, EnvironmentFile and ExecStart together, and set
+# User= to the account that owns the install and may open the serial devices.
+# Install: copy the repo there, create .venv, run `pip install -e ".[robot]"`, create .env from
+# .env.example (ROBOT_LINK_TOKEN must be set), then:
+#   sudo cp deploy/robot-agent.service /etc/systemd/system/ && sudo systemctl daemon-reload
+#   sudo systemctl enable --now robot-agent
+[Unit]
+Description=Mecanum robot agent (WebSocket server, STM32, LiDAR)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+#User=CHANGE_ME
+SupplementaryGroups=dialout
+WorkingDirectory=/opt/mecanum_base
+EnvironmentFile=/opt/mecanum_base/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/mecanum_base/.venv/bin/python -m robot_agent
+Restart=on-failure
+RestartSec=3
+# Exit status 2 means a configuration error (for example an empty ROBOT_LINK_TOKEN): do not loop.
+RestartPreventExitStatus=2
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

@@ -1145,11 +1145,1443 @@ Trạng thái: `TODO → ORDERED → CODED → PASS → MERGED` hoặc `BLOCKED`
 
 
 ### T04 — WS server, cấu hình, mô phỏng
-- Trạng thái: TODO · Plan: P1 · Phụ thuộc: T03
+- Trạng thái: CODED · Plan: P1 · Phụ thuộc: T03
 - Spec: FR-03, SAF-03, SAF-07, PROTO-2, NFR-03, NFR-06
-- File: `robot/robot_agent/{__main__,config,server,sim}.py`, `deploy/robot-agent.service`, `robot/tests/test_robot.py`
+- File: `robot/robot_agent/{__main__,config,server,sim}.py`, `deploy/robot-agent.service`, `robot/tests/test_robot.py`, `pyproject.toml` (chỉ cấu hình pytest-asyncio)
 - Đạt khi: chạy `ROBOT_SIMULATE=true python -m robot_agent`; sai token bị từ chối; message không phải `cmd_vel` bị bỏ; mất link thì writer về 0; thiết bị lỗi được thử lại độc lập.
-- Work order: _(Sonnet điền)_
+- Work order:
+
+  **QUY TẮC ĐẦU TIÊN: Chỉ chạm các file được liệt kê dưới đây. Nếu thiếu thông tin hoặc có mâu thuẫn, dừng lại và trả `BLOCKED` kèm câu hỏi. Không chạy `git commit` (và không chạy lệnh git nào làm thay đổi repo). Các file được phép chạm: `robot/robot_agent/config.py`, `sim.py`, `server.py`, `__main__.py` (tạo mới), `deploy/robot-agent.service` (tạo mới), `robot/tests/test_robot.py` (sửa), `pyproject.toml` (chỉ thêm đúng một dòng). Không sửa `drive.py`, `hardware.py`, `.env.example` hay bất kỳ file nào khác. Không khởi động camera. Không thêm hệ số 1.89 hay giới hạn tốc độ vào đâu cả.**
+
+  Thư mục làm việc: `/home/vth/ws/mecanum_base` (nhánh `feature/T04-robot-server`). Dùng `.venv/bin/...`. Tất cả code dưới đây đã được Sonnet chạy thử trong bản sao với `websockets 16.1.1`: 73 test pass, ổn định qua 30 lần chạy kể cả khi CPU bị tải. Sao chép **nguyên văn** (bỏ 2 dấu cách thụt đầu dòng của khối markdown); không "cải tiến".
+
+  **Quyết định thiết kế đã chốt (Haiku không đổi):**
+  - Cấu hình: biến môi trường thật thắng `.env` ở gốc repo (`python-dotenv`, `dotenv_values`, không ghi vào `os.environ`). `ROBOT_LINK_TOKEN` rỗng thì `ConfigError`, `__main__` in lỗi ra stderr và thoát mã 2 (không bao giờ khởi động). `ROBOT_MOTION_ENABLED` mặc định `false`. `ROBOT_BIND_HOST` mặc định `127.0.0.1`; địa chỉ đại diện (`0.0.0.0`, `::`, `*`) bị từ chối vì chỉ được bind IP cụ thể.
+  - `sim.py`: tính lười theo đồng hồ (không thread). `SimulatedStm32` đáp ứng bậc nhất (`tau_s=0.1`), báo vận tốc làm tròn 1 mm/s (đơn vị wire), `t_ns` đơn điệu không giảm. `SimulatedLidar` cho scan 360 điểm ở 10 Hz. Không import thư viện phần cứng (chỉ import kiểu dữ liệu từ `hardware.py`, vốn không import `serial` ở mức module).
+  - `server.py`: `websockets.asyncio.server.serve`, đường dẫn `/ws`, kiểm `Authorization: Bearer <token>` bằng `hmac.compare_digest` ngay trong handshake (`process_request`): sai/thiếu token trả HTTP 401, sai đường dẫn trả 404. Chỉ nhận đúng tập khóa `{t, seq, vx, vy, wz}` với `t == "cmd_vel"`, `seq` là số nguyên, ba vận tốc là số (không phải bool); thứ khác (JSON hỏng, khung nhị phân, khóa thừa như `src`, kiểu sai) chỉ tăng bộ đếm `ignored`, không tới writer. Giá trị NaN/vô cực/quá int16 vẫn do `CmdVelWriter` loại (SAF-04). Tin nhắn dài quá 1024 byte làm websockets đóng kết nối (mã 1009).
+  - Kết nối hợp lệ mới nhất thay kết nối cũ (SAF-07): gọi `writer.clear()` ngay khi thay, đóng cũ với mã 4000, bỏ qua mọi tin nhắn đến muộn từ kết nối cũ. Kết nối hiện tại đóng thì `writer.clear()` (SAF-03c). `last_cmd_seq` là `seq` của `cmd_vel` gần nhất mà writer chấp nhận, về `null` khi đổi/mất kết nối.
+  - State gửi tối đa 50 Hz, theo vòng: dựng state mới nhất, `await send`, rồi ngủ đến chu kỳ kế (nếu trễ thì bỏ qua, không bù): peer chậm chỉ nhận state mới nhất, không có hàng đợi (NFR-03). Chỗ thêm khung nhị phân `scan` của T13 là phương thức rỗng `RobotServer._send_extras` (gọi một lần mỗi vòng); T04 không cài đặt.
+  - Tên trường state (PROTO-2 chỉ chốt `t_mono_ns`, `last_cmd_seq`; các tên còn lại lấy theo PROTO-1): `t`, `t_mono_ns` (thời điểm mẫu STM32, đồng hồ monotonic của robot; nếu chưa có mẫu thì dùng giờ hiện tại), `last_cmd_seq`, `vel{vx,vy,wz}`, `imu{ax,ay,az,gx,gy,gz}`, `voltage`, `flag_stop`, `charge{current_a,red,charging,set_state}`, `health{stm,lidar,writer}`. Khi chưa có telemetry thì `vel`, `imu`, `voltage`, `flag_stop` là `null`; chưa có frame phụ thì `charge` là `null`. Health thiết bị: `{ok,state,error,restarts}`; health writer: `{running,healthy,error_count,last_error,rejected_count}`.
+  - `__main__.py`: mỗi thiết bị do một `SupervisedDevice` riêng giám sát (khởi động lỗi, hoặc không có mẫu mới quá `stale_s` thì dừng, ghi lỗi vào health, chờ back-off 0.5 s nhân đôi tới 5 s rồi tạo nguồn mới). `SupervisedDevice` cũng đóng vai nguồn (`latest`, `latest_aux`, `send_velocity`) cho writer và server: khi chưa có nguồn chạy thì `latest` là `None` và `send_velocity` ném `RuntimeError`, writer ghi lỗi và tự thử lại. Bind lặp lại với back-off nếu `OSError` (Tailscale IP chưa lên). Tắt máy (SIGTERM/SIGINT): đóng bind, đóng server (mỗi kết nối `clear()`), `writer.stop()` ghi 0 cuối khi STM32 còn chạy, rồi mới dừng thiết bị.
+
+  **Bước 1. `pyproject.toml`: thêm đúng một dòng** ngay dưới dòng `asyncio_mode = "auto"`:
+  ```
+  # old
+  asyncio_mode = "auto"
+  addopts = "-q"
+  # new
+  asyncio_mode = "auto"
+  asyncio_default_fixture_loop_scope = "function"
+  addopts = "-q"
+  ```
+
+  **Bước 2. Tạo `robot/robot_agent/config.py`** với đúng nội dung:
+
+  ```python
+  """Robot agent configuration, read from the environment and the repo-root .env file.
+
+  Real environment variables win over .env. The link token is mandatory: an empty
+  ROBOT_LINK_TOKEN refuses to start (SAF-07). Motion is off unless explicitly enabled (SAF-02).
+  """
+  from __future__ import annotations
+
+  import os
+  from collections.abc import Mapping
+  from dataclasses import dataclass
+  from pathlib import Path
+
+  from dotenv import dotenv_values
+
+  # robot/robot_agent/config.py -> repo root (also /opt/mecanum_base on the Jetson).
+  ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+
+  _TRUE = frozenset({"1", "true", "yes", "on"})
+  _FALSE = frozenset({"0", "false", "no", "off"})
+  _WILDCARD_HOSTS = frozenset({"0.0.0.0", "::", "*"})
+
+
+  class ConfigError(ValueError):
+      """The configuration is unusable; the agent must not start."""
+
+
+  @dataclass(frozen=True)
+  class Config:
+      motion_enabled: bool
+      simulate: bool
+      stm_port: str
+      stm_baud: int
+      lidar_port: str
+      lidar_baud: int
+      bind_host: str
+      bind_port: int
+      link_token: str
+
+
+  def _text(env: Mapping[str, str], name: str, default: str) -> str:
+      value = env.get(name, "").strip()
+      return value if value else default
+
+
+  def _flag(env: Mapping[str, str], name: str) -> bool:
+      value = env.get(name, "").strip().lower()
+      if not value:
+          return False
+      if value in _TRUE:
+          return True
+      if value in _FALSE:
+          return False
+      raise ConfigError(f"{name} must be true or false")
+
+
+  def _integer(env: Mapping[str, str], name: str, default: int, low: int, high: int) -> int:
+      raw = env.get(name, "").strip()
+      if not raw:
+          return default
+      try:
+          value = int(raw)
+      except ValueError:
+          raise ConfigError(f"{name} must be an integer") from None
+      if not low <= value <= high:
+          raise ConfigError(f"{name} must be between {low} and {high}")
+      return value
+
+
+  def load_config(
+      environ: Mapping[str, str] | None = None, *, env_file: Path | str = ENV_FILE
+  ) -> Config:
+      if environ is None:
+          file_values = {k: v for k, v in dotenv_values(env_file).items() if v is not None}
+          environ = {**file_values, **os.environ}
+      token = environ.get("ROBOT_LINK_TOKEN", "").strip()
+      if not token:
+          raise ConfigError("ROBOT_LINK_TOKEN is empty: refusing to start without a link token")
+      host = _text(environ, "ROBOT_BIND_HOST", "127.0.0.1")
+      if host in _WILDCARD_HOSTS:
+          raise ConfigError("ROBOT_BIND_HOST must be a specific address, not a wildcard")
+      return Config(
+          motion_enabled=_flag(environ, "ROBOT_MOTION_ENABLED"),
+          simulate=_flag(environ, "ROBOT_SIMULATE"),
+          stm_port=_text(environ, "STM_PORT", "/dev/rai_controller"),
+          stm_baud=_integer(environ, "STM_BAUD", 115200, 1, 4_000_000),
+          lidar_port=_text(environ, "LIDAR_PORT", "/dev/rai_lidar"),
+          lidar_baud=_integer(environ, "LIDAR_BAUD", 460800, 1, 4_000_000),
+          bind_host=host,
+          bind_port=_integer(environ, "ROBOT_BIND_PORT", 8765, 1, 65535),
+          link_token=token,
+      )
+  ```
+
+  **Bước 3. Tạo `robot/robot_agent/sim.py`** với đúng nội dung:
+
+  ```python
+  """Simulated STM32 and LiDAR for ROBOT_SIMULATE=true (NFR-06).
+
+  Drop-in replacements for the real sources: same attributes and methods that the writer, the
+  server and the supervisor use. Both are computed lazily from a clock, so there are no threads.
+  No hardware libraries are imported.
+  """
+  from __future__ import annotations
+
+  import math
+  import threading
+  import time
+  from collections.abc import Callable
+
+  from .hardware import (
+      LidarPoint,
+      LidarScan,
+      Stm32AuxTelemetry,
+      Stm32Telemetry,
+      encode_stm32_velocity_command,
+  )
+
+
+  class SimulatedStm32:
+      """First-order velocity response toward the last command, reported in wire units."""
+
+      def __init__(
+          self,
+          *,
+          tau_s: float = 0.1,
+          voltage_v: float = 12.0,
+          clock_ns: Callable[[], int] = time.monotonic_ns,
+      ) -> None:
+          if not math.isfinite(tau_s) or tau_s <= 0.0:
+              raise ValueError("tau_s must be positive and finite")
+          self.tau_s = tau_s
+          self.voltage_v = voltage_v
+          self.errors = 0
+          self.last_command: tuple[int, float, float, float] | None = None
+          self._clock = clock_ns
+          self._lock = threading.Lock()
+          self._started = False
+          self._t_ns = 0
+          self._velocity = (0.0, 0.0, 0.0)
+          self._target = (0.0, 0.0, 0.0)
+
+      def _advance(self) -> None:
+          # Caller holds the lock. The sample time never goes backwards.
+          now = max(self._clock(), self._t_ns)
+          dt = (now - self._t_ns) / 1e9
+          if dt > 0.0:
+              keep = math.exp(-dt / self.tau_s)
+              self._velocity = tuple(
+                  goal + (value - goal) * keep for value, goal in zip(self._velocity, self._target)
+              )
+          self._t_ns = now
+
+      def start(self) -> None:
+          with self._lock:
+              self._started = True
+              self._t_ns = self._clock()
+              self._velocity = (0.0, 0.0, 0.0)
+              self._target = (0.0, 0.0, 0.0)
+              self.errors = 0
+
+      def stop(self) -> None:
+          with self._lock:
+              self._started = False
+              self._velocity = (0.0, 0.0, 0.0)
+              self._target = (0.0, 0.0, 0.0)
+
+      def send_velocity(self, vx_mps: float, vy_mps: float, wz_radps: float) -> None:
+          # Same validation as the real frame encoder (finite and within int16 millimetres).
+          encode_stm32_velocity_command(vx_mps, vy_mps, wz_radps)
+          with self._lock:
+              if not self._started:
+                  raise RuntimeError("simulated STM32 is not started")
+              self._advance()
+              wire = (vx_mps, vy_mps, wz_radps)
+              self._target = tuple(round(float(v) * 1000.0) / 1000.0 for v in wire)
+              self.last_command = (self._t_ns, float(vx_mps), float(vy_mps), float(wz_radps))
+
+      @property
+      def latest(self) -> Stm32Telemetry | None:
+          with self._lock:
+              if not self._started:
+                  return None
+              self._advance()
+              vx, vy, wz = (round(v * 1000.0) / 1000.0 for v in self._velocity)
+              return Stm32Telemetry(
+                  t_ns=self._t_ns,
+                  flag_stop=0,
+                  vx_mps=vx,
+                  vy_mps=vy,
+                  wz_radps=wz,
+                  accel_x_mps2=0.0,
+                  accel_y_mps2=0.0,
+                  accel_z_mps2=9.81,
+                  gyro_x_radps=0.0,
+                  gyro_y_radps=0.0,
+                  gyro_z_radps=wz,
+                  voltage_v=self.voltage_v,
+              )
+
+      @property
+      def latest_aux(self) -> Stm32AuxTelemetry | None:
+          with self._lock:
+              if not self._started:
+                  return None
+              self._advance()
+              return Stm32AuxTelemetry(
+                  t_ns=self._t_ns, charging_current_a=0.0, red=0, charging=False, charge_set_state=0
+              )
+
+
+  class SimulatedLidar:
+      """A fake 360 point scan, one new scan every period_s (default 10 Hz)."""
+
+      def __init__(
+          self,
+          *,
+          period_s: float = 0.1,
+          clock_ns: Callable[[], int] = time.monotonic_ns,
+      ) -> None:
+          if not math.isfinite(period_s) or period_s <= 0.0:
+              raise ValueError("period_s must be positive and finite")
+          self.error: Exception | None = None
+          self._period_ns = max(1, int(round(period_s * 1e9)))
+          self._clock = clock_ns
+          self._lock = threading.Lock()
+          self._started = False
+          self._t0_ns = 0
+          self._scan: LidarScan | None = None
+
+      def start(self) -> None:
+          with self._lock:
+              self._started = True
+              self._t0_ns = self._clock()
+              self._scan = None
+              self.error = None
+
+      def stop(self) -> None:
+          with self._lock:
+              self._started = False
+              self._scan = None
+
+      @property
+      def scan_rate_hz(self) -> float:
+          return 1e9 / self._period_ns if self._started else 0.0
+
+      @property
+      def latest(self) -> LidarScan | None:
+          with self._lock:
+              if not self._started:
+                  return None
+              index = (self._clock() - self._t0_ns) // self._period_ns
+              if index < 1:
+                  return None
+              t_ns = self._t0_ns + index * self._period_ns
+              if self._scan is None or self._scan.t_ns != t_ns:
+                  wobble = 0.05 * math.sin(index / 5.0)
+                  points = tuple(
+                      LidarPoint(
+                          t_ns,
+                          math.radians(degree),
+                          2.0 + 0.5 * math.sin(math.radians(2 * degree)) + wobble,
+                          100,
+                          0,
+                      )
+                      for degree in range(360)
+                  )
+                  self._scan = LidarScan(t_ns, points)
+              return self._scan
+  ```
+
+  **Bước 4. Tạo `robot/robot_agent/server.py`** với đúng nội dung:
+
+  ```python
+  """Robot WebSocket server (PROTO-2): ws://<ROBOT_BIND_HOST>:<ROBOT_BIND_PORT>/ws.
+
+  Down: only {"t":"cmd_vel","seq","vx","vy","wz"} (wire units) reaches the writer (FR-03).
+  Up: JSON "state" at most 50 Hz. Binary "scan" frames are added in T13 (see _send_extras).
+  The robot knows nothing about the app-side scale factor.
+  """
+  from __future__ import annotations
+
+  import asyncio
+  import hmac
+  import json
+  import time
+  from collections.abc import Callable
+  from http import HTTPStatus
+  from typing import Any
+  from urllib.parse import urlsplit
+
+  from websockets.asyncio.server import serve
+  from websockets.exceptions import ConnectionClosed
+
+  WS_PATH = "/ws"
+  MAX_STATE_HZ = 50.0
+  MAX_MESSAGE_BYTES = 1024
+  CLOSE_REPLACED = 4000
+  _CMD_KEYS = frozenset(("t", "seq", "vx", "vy", "wz"))
+
+
+  def _number(value: Any) -> bool:
+      return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+  def parse_cmd_vel(data: Any) -> tuple[int, float, float, float] | None:
+      """Return (seq, vx, vy, wz) for a well-formed cmd_vel message, else None."""
+      if not isinstance(data, dict) or set(data) != _CMD_KEYS or data["t"] != "cmd_vel":
+          return None
+      seq = data["seq"]
+      if isinstance(seq, bool) or not isinstance(seq, int):
+          return None
+      if not (_number(data["vx"]) and _number(data["vy"]) and _number(data["wz"])):
+          return None
+      return seq, data["vx"], data["vy"], data["wz"]
+
+
+  class RobotServer:
+      def __init__(
+          self,
+          *,
+          token: str,
+          writer: Any,
+          stm: Any,
+          devices: Callable[[], dict[str, dict[str, Any]]],
+          state_hz: float = MAX_STATE_HZ,
+      ) -> None:
+          """writer: CmdVelWriter. stm: object with latest/latest_aux (may return None).
+          devices: returns {"stm": {...}, "lidar": {...}} health dicts from the supervisors."""
+          if not token:
+              raise ValueError("link token must not be empty")
+          if not 0.0 < state_hz <= MAX_STATE_HZ:
+              raise ValueError(f"state_hz must be in (0, {MAX_STATE_HZ}]")
+          self._expected = ("Bearer " + token).encode("utf-8")
+          self.writer = writer
+          self._stm = stm
+          self._devices = devices
+          self._period_s = 1.0 / state_hz
+          self._server: Any = None
+          self._current: Any = None
+          self._closers: set[asyncio.Future] = set()
+          self._last_cmd_seq: int | None = None
+          self.ignored = 0  # messages dropped without reaching the writer
+
+      # ---- lifecycle ----
+
+      async def start(self, host: str, port: int) -> int:
+          """Bind and serve. Raises OSError if the address is not available. Returns the port."""
+          self._server = await serve(
+              self._handler,
+              host,
+              port,
+              process_request=self._process_request,
+              max_size=MAX_MESSAGE_BYTES,
+              compression=None,
+              ping_interval=2,
+              ping_timeout=2,
+          )
+          return int(self._server.sockets[0].getsockname()[1])
+
+      async def close(self) -> None:
+          if self._server is not None:
+              self._server.close()  # closes live connections; each handler then clears the writer
+              await self._server.wait_closed()
+              self._server = None
+
+      # ---- handshake ----
+
+      def _authorized(self, header: str | None) -> bool:
+          return hmac.compare_digest((header or "").encode("utf-8"), self._expected)
+
+      def _process_request(self, connection: Any, request: Any) -> Any:
+          if urlsplit(request.path).path != WS_PATH:
+              return connection.respond(HTTPStatus.NOT_FOUND, "not found\n")
+          if not self._authorized(request.headers.get("Authorization")):
+              return connection.respond(HTTPStatus.UNAUTHORIZED, "unauthorized\n")
+          return None
+
+      # ---- one connection ----
+
+      def _claim(self, conn: Any) -> None:
+          """The newest valid connection replaces the old one (SAF-07)."""
+          old, self._current = self._current, conn
+          self._last_cmd_seq = None
+          if old is not None:
+              self.writer.clear()  # SAF-03c: the replaced link's command must not survive
+              closer = asyncio.ensure_future(old.close(CLOSE_REPLACED, "replaced"))
+              self._closers.add(closer)
+              closer.add_done_callback(self._closers.discard)
+
+      def _release(self, conn: Any) -> None:
+          if self._current is conn:
+              self._current = None
+              self._last_cmd_seq = None
+              self.writer.clear()  # SAF-03c: link lost -> writer returns to zero
+
+      async def _handler(self, conn: Any) -> None:
+          self._claim(conn)
+          sender = asyncio.ensure_future(self._send_states(conn))
+          try:
+              async for message in conn:
+                  if self._current is not conn:
+                      break
+                  self._on_message(message)
+          except ConnectionClosed:
+              pass
+          finally:
+              self._release(conn)
+              sender.cancel()
+              await asyncio.gather(sender, return_exceptions=True)
+
+      def _on_message(self, message: str | bytes) -> None:
+          command = None
+          if isinstance(message, str):
+              try:
+                  command = parse_cmd_vel(json.loads(message))
+              except (ValueError, RecursionError):
+                  command = None
+          if command is None:  # binary frame, bad JSON, or anything but a valid cmd_vel
+              self.ignored += 1
+              return
+          seq, vx, vy, wz = command
+          if self.writer.set_cmd_vel(vx, vy, wz):
+              self._last_cmd_seq = seq
+
+      # ---- state out ----
+
+      def build_state(self) -> dict[str, Any]:
+          sample = self._stm.latest
+          aux = self._stm.latest_aux
+          devices = self._devices()
+          health = self.writer.health()
+          state: dict[str, Any] = {
+              "t": "state",
+              "t_mono_ns": sample.t_ns if sample is not None else time.monotonic_ns(),
+              "last_cmd_seq": self._last_cmd_seq,
+              "vel": None,
+              "imu": None,
+              "voltage": None,
+              "flag_stop": None,
+              "charge": None,
+              "health": {
+                  "stm": devices["stm"],
+                  "lidar": devices["lidar"],
+                  "writer": {
+                      "running": health.running,
+                      "healthy": health.healthy,
+                      "error_count": health.error_count,
+                      "last_error": health.last_error,
+                      "rejected_count": health.rejected_count,
+                  },
+              },
+          }
+          if sample is not None:
+              state["vel"] = {"vx": sample.vx_mps, "vy": sample.vy_mps, "wz": sample.wz_radps}
+              state["imu"] = {
+                  "ax": sample.accel_x_mps2,
+                  "ay": sample.accel_y_mps2,
+                  "az": sample.accel_z_mps2,
+                  "gx": sample.gyro_x_radps,
+                  "gy": sample.gyro_y_radps,
+                  "gz": sample.gyro_z_radps,
+              }
+              state["voltage"] = sample.voltage_v
+              state["flag_stop"] = sample.flag_stop
+          if aux is not None:
+              state["charge"] = {
+                  "current_a": aux.charging_current_a,
+                  "red": aux.red,
+                  "charging": aux.charging,
+                  "set_state": aux.charge_set_state,
+              }
+          return state
+
+      async def _send_states(self, conn: Any) -> None:
+          # One send at a time: a slow peer only ever receives the newest state, because the next
+          # state is built after the previous send finished. No queue, no backlog (NFR-03).
+          loop = asyncio.get_running_loop()
+          due = loop.time()
+          try:
+              while self._current is conn:
+                  await conn.send(json.dumps(self.build_state(), separators=(",", ":")))
+                  await self._send_extras(conn)
+                  due += self._period_s
+                  now = loop.time()
+                  if due < now:
+                      due = now  # fell behind: skip ahead, never burst above the rate limit
+                  await asyncio.sleep(due - now)
+          except ConnectionClosed:
+              return
+
+      async def _send_extras(self, conn: Any) -> None:
+          """T13 adds binary `scan` frames here (PROTO-2). Intentionally empty in T04."""
+  ```
+
+  **Bước 5. Tạo `robot/robot_agent/__main__.py`** với đúng nội dung:
+
+  ```python
+  """Robot agent entry point: python -m robot_agent.
+
+  Starts the STM32 and LiDAR sources (real, or simulated with ROBOT_SIMULATE=true), the cmd_vel
+  writer and the WebSocket server. Each device is supervised on its own: a device that fails to
+  start, or later stops producing data, is reported in health and retried with back-off, without
+  affecting the writer, the other device or the server. The camera is never started (D-07).
+  """
+  from __future__ import annotations
+
+  import asyncio
+  import logging
+  import signal
+  import sys
+  import time
+  from collections.abc import Callable
+  from typing import Any
+
+  from . import hardware
+  from .config import Config, ConfigError, load_config
+  from .drive import CmdVelWriter
+  from .server import RobotServer
+  from .sim import SimulatedLidar, SimulatedStm32
+
+  log = logging.getLogger("robot_agent")
+
+
+  class SupervisedDevice:
+      """Starts a source from a factory, watches it for fresh data, restarts it with back-off.
+
+      Also acts as the source itself (latest, latest_aux, send_velocity) so the writer and the
+      server keep working across restarts: while there is no running source, latest is None and
+      send_velocity raises, which the writer records and retries.
+      """
+
+      def __init__(
+          self,
+          name: str,
+          factory: Callable[[], Any],
+          probe: Callable[[Any], int | None],
+          *,
+          stale_s: float,
+          backoff_s: float = 0.5,
+          max_backoff_s: float = 5.0,
+          poll_s: float = 0.1,
+      ) -> None:
+          self.name = name
+          self._factory = factory
+          self._probe = probe  # returns a stamp that changes whenever the source produced data
+          self._stale_s = stale_s
+          self._backoff_s = backoff_s
+          self._max_backoff_s = max_backoff_s
+          self._poll_s = poll_s
+          self._source: Any = None
+          self._state = "starting"
+          self._error: str | None = None
+          self.restarts = 0
+
+      # ---- source proxy ----
+
+      @property
+      def latest(self) -> Any:
+          source = self._source
+          return source.latest if source is not None else None
+
+      @property
+      def latest_aux(self) -> Any:
+          source = self._source
+          return getattr(source, "latest_aux", None) if source is not None else None
+
+      def send_velocity(self, vx: float, vy: float, wz: float) -> None:
+          source = self._source
+          if source is None:
+              raise RuntimeError(f"{self.name} is not running")
+          source.send_velocity(vx, vy, wz)
+
+      def health(self) -> dict[str, Any]:
+          return {
+              "ok": self._state == "ok",
+              "state": self._state,
+              "error": self._error,
+              "restarts": self.restarts,
+          }
+
+      # ---- supervision ----
+
+      @staticmethod
+      def _stop_now(source: Any) -> None:
+          try:
+              source.stop()
+          except Exception:
+              log.exception("stopping a device source failed")
+
+      async def _watch(self, source: Any) -> tuple[bool, str]:
+          """Wait until the source fails or goes quiet. Returns (produced_data, reason)."""
+          stamp = None
+          produced = False
+          last_progress = time.monotonic()
+          while True:
+              await asyncio.sleep(self._poll_s)
+              error = getattr(source, "error", None)
+              if error is not None:
+                  return produced, f"{type(error).__name__}: {error}"
+              try:
+                  current = self._probe(source)
+              except Exception as exc:
+                  return produced, f"{type(exc).__name__}: {exc}"
+              now = time.monotonic()
+              if current is not None and current != stamp:
+                  stamp = current
+                  produced = True
+                  last_progress = now
+                  self._state = "ok"
+                  self._error = None
+              elif now - last_progress > self._stale_s:
+                  return produced, f"no data for more than {self._stale_s:g} s"
+
+      async def run(self) -> None:
+          delay = self._backoff_s
+          source = None
+          try:
+              while True:
+                  produced = False
+                  try:
+                      self._state = "starting"
+                      source = self._factory()
+                      await asyncio.to_thread(source.start)
+                      self._source = source
+                      produced, reason = await self._watch(source)
+                  except Exception as exc:
+                      reason = f"{type(exc).__name__}: {exc}"
+                  self._source = None
+                  if source is not None:
+                      await asyncio.to_thread(self._stop_now, source)
+                      source = None
+                  self._state = "failed"
+                  self._error = reason
+                  self.restarts += 1
+                  log.warning("%s: %s; retrying in %.1f s", self.name, reason, delay)
+                  delay = self._backoff_s if produced else min(delay * 2, self._max_backoff_s)
+                  await asyncio.sleep(delay)
+          finally:
+              self._source = None
+              if source is not None:  # cancelled while a source was up
+                  self._stop_now(source)
+
+
+  async def bind_with_retry(
+      server: RobotServer,
+      host: str,
+      port: int,
+      *,
+      delay_s: float = 1.0,
+      max_delay_s: float = 5.0,
+  ) -> int:
+      """Bind the server, retrying while the address is not available (Tailscale not up yet)."""
+      while True:
+          try:
+              actual = await server.start(host, port)
+          except OSError as error:
+              log.warning("cannot bind %s:%s (%s); retrying in %.1f s", host, port, error, delay_s)
+              await asyncio.sleep(delay_s)
+              delay_s = min(delay_s * 2, max_delay_s)
+              continue
+          log.info("listening on %s:%s", host, actual)
+          return actual
+
+
+  def _latest_stamp(source: Any) -> int | None:
+      sample = source.latest
+      return sample.t_ns if sample is not None else None
+
+
+  def build_devices(config: Config) -> tuple[SupervisedDevice, SupervisedDevice]:
+      if config.simulate:
+
+          def make_stm() -> Any:
+              return SimulatedStm32()
+
+          def make_lidar() -> Any:
+              return SimulatedLidar()
+
+      else:
+
+          def make_stm() -> Any:
+              return hardware.Stm32SerialSource(config.stm_port, baudrate=config.stm_baud)
+
+          def make_lidar() -> Any:
+              return hardware.N10PSerialSource(
+                  config.lidar_port,
+                  profile=hardware.N10P_PROTOCOL_PROFILE,
+                  baudrate=config.lidar_baud,
+              )
+
+      stm = SupervisedDevice("stm", make_stm, _latest_stamp, stale_s=2.0)
+      lidar = SupervisedDevice("lidar", make_lidar, _latest_stamp, stale_s=3.0)
+      return stm, lidar
+
+
+  async def run(config: Config) -> None:
+      stop = asyncio.Event()
+      loop = asyncio.get_running_loop()
+      for signum in (signal.SIGTERM, signal.SIGINT):
+          loop.add_signal_handler(signum, stop.set)
+
+      stm, lidar = build_devices(config)
+      writer = CmdVelWriter(stm, motion_enabled=config.motion_enabled)
+      server = RobotServer(
+          token=config.link_token,
+          writer=writer,
+          stm=stm,
+          devices=lambda: {"stm": stm.health(), "lidar": lidar.health()},
+      )
+      if not config.motion_enabled:
+          log.warning("ROBOT_MOTION_ENABLED is false: only zero velocity will be written")
+      if config.simulate:
+          log.warning("ROBOT_SIMULATE is true: using simulated STM32 and LiDAR")
+
+      writer.start()
+      device_tasks = [asyncio.ensure_future(stm.run()), asyncio.ensure_future(lidar.run())]
+      bind_task = asyncio.ensure_future(
+          bind_with_retry(server, config.bind_host, config.bind_port)
+      )
+      try:
+          await stop.wait()
+      finally:
+          log.info("shutting down")
+          bind_task.cancel()
+          await asyncio.gather(bind_task, return_exceptions=True)
+          await server.close()  # each open connection clears the writer
+          # The final zero goes out while the STM32 source is still running.
+          if not await asyncio.to_thread(writer.stop):
+              log.error("final zero velocity could not be written")
+          for task in device_tasks:
+              task.cancel()
+          await asyncio.gather(*device_tasks, return_exceptions=True)  # stops the sources
+
+
+  def main() -> int:
+      logging.basicConfig(
+          level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+      )
+      try:
+          config = load_config()
+      except ConfigError as error:
+          print(f"robot_agent: {error}", file=sys.stderr)
+          return 2
+      asyncio.run(run(config))
+      return 0
+
+
+  if __name__ == "__main__":
+      raise SystemExit(main())
+  ```
+
+  **Bước 6. Tạo thư mục `deploy/` (`mkdir -p deploy`) và `deploy/robot-agent.service`** với đúng nội dung:
+
+  ```ini
+  # systemd unit for the robot agent on the Jetson.
+  # NOTE: the real install path on the Jetson is not known yet (confirm in T15). /opt/mecanum_base
+  # is a placeholder: adjust WorkingDirectory, EnvironmentFile and ExecStart together, and set
+  # User= to the account that owns the install and may open the serial devices.
+  # Install: copy the repo there, create .venv, run `pip install -e ".[robot]"`, create .env from
+  # .env.example (ROBOT_LINK_TOKEN must be set), then:
+  #   sudo cp deploy/robot-agent.service /etc/systemd/system/ && sudo systemctl daemon-reload
+  #   sudo systemctl enable --now robot-agent
+  [Unit]
+  Description=Mecanum robot agent (WebSocket server, STM32, LiDAR)
+  After=network-online.target tailscaled.service
+  Wants=network-online.target
+
+  [Service]
+  Type=simple
+  #User=CHANGE_ME
+  SupplementaryGroups=dialout
+  WorkingDirectory=/opt/mecanum_base
+  EnvironmentFile=/opt/mecanum_base/.env
+  Environment=PYTHONUNBUFFERED=1
+  ExecStart=/opt/mecanum_base/.venv/bin/python -m robot_agent
+  Restart=on-failure
+  RestartSec=3
+  # Exit status 2 means a configuration error (for example an empty ROBOT_LINK_TOKEN): do not loop.
+  RestartPreventExitStatus=2
+  KillSignal=SIGTERM
+  TimeoutStopSec=15
+
+  [Install]
+  WantedBy=multi-user.target
+  ```
+
+  **Bước 7. `robot/tests/test_robot.py`: hai chỉnh sửa.**
+
+  (a) Thay phần import ở đầu file:
+  ```python
+  # old
+  import struct
+  import threading
+  import time
+  from types import SimpleNamespace
+
+  import pytest
+
+  from robot_agent import drive, hardware
+  # new
+  import asyncio
+  import json
+  import struct
+  import threading
+  import time
+  from types import SimpleNamespace
+
+  import pytest
+  from websockets.asyncio.client import connect
+  from websockets.exceptions import InvalidStatus
+
+  from robot_agent import __main__ as agent
+  from robot_agent import config, drive, hardware, server, sim
+  ```
+
+  (b) Thêm đoạn sau vào cuối file (sau hai dòng trống; mọi test cũ giữ nguyên, kể cả `FakeDriveSource`, `T0`, `MS` đã có). Đoạn đầu (`TimedSource` và `test_retry_backoff_is_waited_after_write_error`) là test còn thiếu từ review T03: sau lỗi ghi, lần thử kế phải chờ đúng `retry_s`.
+
+  ```python
+  class TimedSource(FakeDriveSource):
+      def __init__(self, t_ns: int) -> None:
+          super().__init__(t_ns)
+          self.times: list[float] = []
+          self.second_attempt = threading.Event()
+
+      def send_velocity(self, vx: float, vy: float, wz: float) -> None:
+          self.times.append(time.monotonic())
+          if len(self.times) == 2:
+              self.second_attempt.set()
+          super().send_velocity(vx, vy, wz)
+
+
+  def test_retry_backoff_is_waited_after_write_error():
+      source = TimedSource(T0)
+      source.fail_first = 1
+      writer = drive.CmdVelWriter(source, period_s=0.01, retry_s=0.2)
+      writer.start()
+      try:
+          assert source.second_attempt.wait(3.0)
+      finally:
+          assert writer.stop() is True
+      # The first write failed, so the next attempt must wait retry_s (not the 0.01 s period).
+      assert source.times[1] - source.times[0] >= 0.18
+
+
+  # ---------------------------------------------------------------- T04: config
+
+
+  def _clear_robot_env(monkeypatch) -> None:
+      for name in (
+          "ROBOT_MOTION_ENABLED",
+          "ROBOT_SIMULATE",
+          "STM_PORT",
+          "STM_BAUD",
+          "LIDAR_PORT",
+          "LIDAR_BAUD",
+          "ROBOT_BIND_HOST",
+          "ROBOT_BIND_PORT",
+          "ROBOT_LINK_TOKEN",
+      ):
+          monkeypatch.delenv(name, raising=False)
+
+
+  def test_config_defaults_are_safe():
+      cfg = config.load_config({"ROBOT_LINK_TOKEN": "x"})
+      assert cfg.motion_enabled is False
+      assert cfg.simulate is False
+      assert cfg.bind_host == "127.0.0.1"
+      assert cfg.bind_port == 8765
+      assert cfg.stm_baud == 115200
+      assert cfg.lidar_baud == 460800
+      assert cfg.link_token == "x"
+
+
+  def test_config_parses_values():
+      cfg = config.load_config(
+          {
+              "ROBOT_LINK_TOKEN": "tok",
+              "ROBOT_MOTION_ENABLED": "TRUE",
+              "ROBOT_SIMULATE": "1",
+              "ROBOT_BIND_HOST": "100.69.39.18",
+              "ROBOT_BIND_PORT": "9000",
+              "STM_PORT": "/dev/ttyUSB0",
+          }
+      )
+      assert cfg.motion_enabled is True
+      assert cfg.simulate is True
+      assert cfg.bind_host == "100.69.39.18"
+      assert cfg.bind_port == 9000
+      assert cfg.stm_port == "/dev/ttyUSB0"
+
+
+  @pytest.mark.parametrize(
+      "env",
+      [
+          {},
+          {"ROBOT_LINK_TOKEN": ""},
+          {"ROBOT_LINK_TOKEN": "   "},
+          {"ROBOT_LINK_TOKEN": "x", "ROBOT_BIND_HOST": "0.0.0.0"},
+          {"ROBOT_LINK_TOKEN": "x", "ROBOT_MOTION_ENABLED": "maybe"},
+          {"ROBOT_LINK_TOKEN": "x", "ROBOT_BIND_PORT": "abc"},
+          {"ROBOT_LINK_TOKEN": "x", "ROBOT_BIND_PORT": "70000"},
+      ],
+  )
+  def test_config_refuses_bad_values(env):
+      with pytest.raises(config.ConfigError):
+          config.load_config(env)
+
+
+  def test_config_reads_env_file_and_real_env_wins(tmp_path, monkeypatch):
+      _clear_robot_env(monkeypatch)
+      env_file = tmp_path / ".env"
+      env_file.write_text("ROBOT_LINK_TOKEN=from-file\nROBOT_BIND_PORT=9001\nROBOT_SIMULATE=true\n")
+      cfg = config.load_config(env_file=env_file)
+      assert (cfg.link_token, cfg.bind_port, cfg.simulate) == ("from-file", 9001, True)
+      monkeypatch.setenv("ROBOT_BIND_PORT", "9002")
+      assert config.load_config(env_file=env_file).bind_port == 9002
+
+
+  def test_config_missing_env_file_means_empty_token(tmp_path, monkeypatch):
+      _clear_robot_env(monkeypatch)
+      with pytest.raises(config.ConfigError):
+          config.load_config(env_file=tmp_path / "missing.env")
+
+
+  # ------------------------------------------------------------------ T04: sim
+
+
+  def test_sim_stm32_first_order_response_in_wire_units():
+      now = [1_000]
+      stm = sim.SimulatedStm32(tau_s=0.1, clock_ns=lambda: now[0])
+      assert stm.latest is None
+      stm.start()
+      first = stm.latest
+      assert (first.vx_mps, first.vy_mps, first.wz_radps) == (0.0, 0.0, 0.0)
+      stm.send_velocity(0.1, -0.1, 0.0)
+      now[0] += 100_000_000  # one time constant: 1 - exp(-1) = 0.632 of the target
+      one_tau = stm.latest
+      assert one_tau.vx_mps == pytest.approx(0.063, abs=1e-9)
+      assert one_tau.vy_mps == pytest.approx(-0.063, abs=1e-9)
+      assert one_tau.t_ns > first.t_ns
+      now[0] += 1_000_000_000
+      settled = stm.latest
+      assert settled.vx_mps == pytest.approx(0.1, abs=1e-9)
+      assert settled.t_ns > one_tau.t_ns
+      assert stm.last_command[1:] == (0.1, -0.1, 0.0)
+      assert stm.latest_aux is not None and stm.latest_aux.t_ns == settled.t_ns
+
+
+  def test_sim_stm32_timestamps_never_go_backwards():
+      now = [5_000]
+      stm = sim.SimulatedStm32(clock_ns=lambda: now[0])
+      stm.start()
+      stamps = []
+      for value in (6_000, 6_000, 5_500, 7_000):
+          now[0] = value
+          stamps.append(stm.latest.t_ns)
+      assert stamps == sorted(stamps)
+
+
+  def test_sim_stm32_validates_and_requires_start():
+      stm = sim.SimulatedStm32()
+      with pytest.raises(RuntimeError):
+          stm.send_velocity(0.0, 0.0, 0.0)
+      stm.start()
+      with pytest.raises(ValueError):
+          stm.send_velocity(float("nan"), 0.0, 0.0)
+      with pytest.raises(ValueError):
+          stm.send_velocity(32.768, 0.0, 0.0)
+      stm.stop()
+      assert stm.latest is None
+      with pytest.raises(RuntimeError):
+          stm.send_velocity(0.0, 0.0, 0.0)
+
+
+  def test_sim_lidar_produces_scans_at_the_configured_rate():
+      now = [0]
+      lidar = sim.SimulatedLidar(period_s=0.1, clock_ns=lambda: now[0])
+      assert lidar.latest is None
+      assert lidar.scan_rate_hz == 0.0
+      lidar.start()
+      assert lidar.latest is None  # first scan only after one full period
+      assert lidar.scan_rate_hz == pytest.approx(10.0)
+      now[0] = 100_000_000
+      first = lidar.latest
+      assert len(first.points) == 360
+      assert first.t_ns == 100_000_000
+      assert lidar.latest is first  # same period, same scan
+      now[0] = 250_000_000
+      assert lidar.latest.t_ns == 200_000_000
+      lidar.stop()
+      assert lidar.latest is None
+
+
+  # ---------------------------------------------------------------- T04: server
+
+  TOKEN = "unit-test-token"
+  AUTH = {"Authorization": f"Bearer {TOKEN}"}
+
+
+  class FakeWriter:
+      def __init__(self) -> None:
+          self.calls: list[tuple[float, float, float]] = []
+          self.clears = 0
+
+      def set_cmd_vel(self, vx, vy, wz, now_ns=None) -> bool:
+          self.calls.append((vx, vy, wz))
+          return True
+
+      def clear(self) -> None:
+          self.clears += 1
+
+      def health(self) -> drive.WriterHealth:
+          return drive.WriterHealth(True, True, 0, None, 0, None)
+
+
+  def _devices_ok() -> dict:
+      ok = {"ok": True, "state": "ok", "error": None, "restarts": 0}
+      return {"stm": dict(ok), "lidar": dict(ok)}
+
+
+  async def wait_for(predicate, timeout: float = 3.0) -> None:
+      loop = asyncio.get_running_loop()
+      deadline = loop.time() + timeout
+      while not predicate():
+          if loop.time() > deadline:
+              raise AssertionError("timed out waiting for condition")
+          await asyncio.sleep(0.005)
+
+
+  class Rig:
+      def __init__(self, srv, writer, stm, port: int) -> None:
+          self.srv = srv
+          self.writer = writer
+          self.stm = stm
+          self.url = f"ws://127.0.0.1:{port}/ws"
+
+      def connect(self, headers=AUTH, url=None):
+          return connect(url or self.url, additional_headers=headers)
+
+
+  async def _make_rig(writer, devices=_devices_ok) -> Rig:
+      stm = sim.SimulatedStm32()
+      stm.start()
+      srv = server.RobotServer(token=TOKEN, writer=writer, stm=stm, devices=devices)
+      port = await srv.start("127.0.0.1", 0)
+      return Rig(srv, writer, stm, port)
+
+
+  @pytest.fixture
+  async def rig():
+      made = await _make_rig(FakeWriter())
+      yield made
+      await made.srv.close()
+      made.stm.stop()
+
+
+  def _cmd(seq=1, vx=0.1, vy=0.0, wz=0.0, **extra) -> str:
+      return json.dumps({"t": "cmd_vel", "seq": seq, "vx": vx, "vy": vy, "wz": wz, **extra})
+
+
+  async def test_wrong_or_missing_token_is_refused_at_handshake(rig):
+      for headers in (
+          {"Authorization": "Bearer wrong"},
+          {"Authorization": "Bearer "},
+          {"Authorization": TOKEN},
+          {"Authorization": f"bearer {TOKEN}"},
+          {},
+      ):
+          with pytest.raises(InvalidStatus) as refused:
+              async with rig.connect(headers):
+                  pass
+          assert refused.value.response.status_code == 401
+      assert rig.writer.calls == []
+      assert rig.writer.clears == 0
+
+
+  async def test_other_path_is_refused(rig):
+      with pytest.raises(InvalidStatus) as refused:
+          async with rig.connect(url=rig.url.replace("/ws", "/other")):
+              pass
+      assert refused.value.response.status_code == 404
+
+
+  async def test_valid_cmd_vel_reaches_the_writer(rig):
+      async with rig.connect() as ws:
+          await ws.send(_cmd(seq=5, vx=0.1, vy=-0.2, wz=0.3))
+          await wait_for(lambda: rig.writer.calls == [(0.1, -0.2, 0.3)])
+          # Integers are valid numbers too, and there is no speed limit here.
+          await ws.send(_cmd(seq=6, vx=3, vy=0, wz=-9))
+          await wait_for(lambda: len(rig.writer.calls) == 2)
+      assert rig.writer.calls[1] == (3, 0, -9)
+
+
+  async def test_anything_but_cmd_vel_never_reaches_the_writer(rig):
+      bad = [
+          "not json",
+          "{",
+          "",
+          "null",
+          "[]",
+          "[1, 2, 3]",
+          '"cmd_vel"',
+          "42",
+          json.dumps({"t": "arm", "on": True}),
+          json.dumps({"t": "hello", "token": "x"}),
+          json.dumps({"t": "odom_reset"}),
+          json.dumps({"t": "state"}),
+          json.dumps({"seq": 1, "vx": 0.1, "vy": 0, "wz": 0}),
+          json.dumps({"t": "cmd_vel", "seq": 1, "vx": 0.1, "vy": 0}),
+          json.dumps({"t": "cmd_vel", "seq": 1, "vx": "0.1", "vy": 0, "wz": 0}),
+          json.dumps({"t": "cmd_vel", "seq": 1, "vx": True, "vy": 0, "wz": 0}),
+          json.dumps({"t": "cmd_vel", "seq": 1, "vx": None, "vy": 0, "wz": 0}),
+          json.dumps({"t": "cmd_vel", "seq": "1", "vx": 0.1, "vy": 0, "wz": 0}),
+          json.dumps({"t": "cmd_vel", "seq": 1.5, "vx": 0.1, "vy": 0, "wz": 0}),
+          json.dumps({"t": "cmd_vel", "seq": True, "vx": 0.1, "vy": 0, "wz": 0}),
+          json.dumps({"t": "wheel_speeds", "seq": 1, "vx": 0.1, "vy": 0, "wz": 0}),
+          _cmd(src="keyboard"),
+          _cmd().encode(),  # a binary frame, even with valid JSON inside
+          b"\x00\x01\x02",
+      ]
+      async with rig.connect() as ws:
+          for message in bad:
+              await ws.send(message)
+          await ws.send(_cmd(seq=99, vx=0.5))  # sentinel, processed after all of the above
+          await wait_for(lambda: len(rig.writer.calls) >= 1)
+      assert rig.writer.calls == [(0.5, 0.0, 0.0)]
+      assert rig.srv.ignored == len(bad)
+
+
+  async def test_new_connection_replaces_the_old_one(rig):
+      async with rig.connect() as first:
+          await first.send(_cmd(seq=1, vx=0.1))
+          await wait_for(lambda: len(rig.writer.calls) == 1)
+          async with rig.connect() as second:
+              await asyncio.wait_for(first.wait_closed(), 3.0)
+              assert first.close_code == 4000
+              assert rig.writer.clears == 1  # the replaced link's command was cleared
+              await second.send(_cmd(seq=2, vx=0.2))
+              await wait_for(lambda: len(rig.writer.calls) == 2)
+              assert rig.writer.calls[1] == (0.2, 0.0, 0.0)
+          await wait_for(lambda: rig.writer.clears == 2)  # and the newest one clears on close
+
+
+  async def test_disconnect_clears_writer_and_zero_is_written():
+      made = await _make_rig(FakeWriter())
+      # Real writer on the simulated STM32. A long deadman proves clear() stops the robot,
+      # not the 250 ms timeout.
+      stm_writer = drive.CmdVelWriter(
+          made.stm, motion_enabled=True, deadman_s=30.0, period_s=0.01, retry_s=0.01
+      )
+      made.srv.writer = stm_writer
+      stm_writer.start()
+      try:
+          async with made.connect() as ws:
+              await ws.send(_cmd(seq=1, vx=0.2, vy=0.0, wz=0.0))
+              await wait_for(
+                  lambda: made.stm.last_command is not None and made.stm.last_command[1] == 0.2
+              )
+          await wait_for(lambda: made.stm.last_command[1:] == (0.0, 0.0, 0.0))
+          await asyncio.sleep(0.1)  # the old command does not come back
+          assert made.stm.last_command[1:] == (0.0, 0.0, 0.0)
+      finally:
+          await made.srv.close()
+          assert await asyncio.to_thread(stm_writer.stop) is True
+          made.stm.stop()
+
+
+  async def test_state_messages_have_required_fields_and_rate_limit(rig):
+      messages = []
+      async with rig.connect() as ws:
+          loop = asyncio.get_running_loop()
+          start = loop.time()
+          while loop.time() - start < 0.6:
+              messages.append(json.loads(await asyncio.wait_for(ws.recv(), 1.0)))
+          await ws.send(_cmd(seq=7))
+          while True:
+              state = json.loads(await asyncio.wait_for(ws.recv(), 1.0))
+              if state["last_cmd_seq"] == 7:
+                  break
+      first = messages[0]
+      assert first["t"] == "state"
+      assert isinstance(first["t_mono_ns"], int)
+      assert first["last_cmd_seq"] is None
+      assert set(first["vel"]) == {"vx", "vy", "wz"}
+      assert set(first["imu"]) == {"ax", "ay", "az", "gx", "gy", "gz"}
+      assert first["voltage"] == 12.0
+      assert first["flag_stop"] == 0
+      assert set(first["charge"]) == {"current_a", "red", "charging", "set_state"}
+      assert set(first["health"]) == {"stm", "lidar", "writer"}
+      assert first["health"]["stm"]["ok"] is True
+      assert set(first["health"]["writer"]) == {
+          "running",
+          "healthy",
+          "error_count",
+          "last_error",
+          "rejected_count",
+      }
+      stamps = [m["t_mono_ns"] for m in messages]
+      assert stamps == sorted(stamps)
+      assert len(messages) >= 5
+      assert len(messages) <= 0.6 * 50 + 3  # at most about 50 Hz
+
+
+  async def test_state_without_telemetry_has_null_sensor_fields():
+      made = await _make_rig(FakeWriter())
+      made.stm.stop()  # no telemetry at all
+      try:
+          async with made.connect() as ws:
+              state = json.loads(await asyncio.wait_for(ws.recv(), 1.0))
+          assert state["vel"] is None and state["imu"] is None and state["charge"] is None
+          assert state["voltage"] is None and state["flag_stop"] is None
+          assert isinstance(state["t_mono_ns"], int)
+      finally:
+          await made.srv.close()
+
+
+  async def test_failed_device_does_not_stop_the_server_and_is_retried():
+      allow_lidar = threading.Event()
+      attempts = []
+
+      class FlakyLidar(sim.SimulatedLidar):
+          def start(self) -> None:
+              attempts.append(1)
+              if not allow_lidar.is_set():
+                  raise OSError("no lidar")
+              super().start()
+
+      stm_dev = agent.SupervisedDevice(
+          "stm", sim.SimulatedStm32, agent._latest_stamp, stale_s=1.0, poll_s=0.01
+      )
+      lidar_dev = agent.SupervisedDevice(
+          "lidar",
+          lambda: FlakyLidar(period_s=0.02),
+          agent._latest_stamp,
+          stale_s=1.0,
+          backoff_s=0.01,
+          max_backoff_s=0.02,
+          poll_s=0.01,
+      )
+      writer = drive.CmdVelWriter(stm_dev, motion_enabled=True, period_s=0.01, retry_s=0.01)
+      srv = server.RobotServer(
+          token=TOKEN,
+          writer=writer,
+          stm=stm_dev,
+          devices=lambda: {"stm": stm_dev.health(), "lidar": lidar_dev.health()},
+      )
+      port = await srv.start("127.0.0.1", 0)
+      writer.start()
+      tasks = [asyncio.ensure_future(stm_dev.run()), asyncio.ensure_future(lidar_dev.run())]
+      try:
+          await wait_for(lambda: stm_dev.health()["ok"] and len(attempts) >= 2)
+          async with connect(f"ws://127.0.0.1:{port}/ws", additional_headers=AUTH) as ws:
+              state = json.loads(await asyncio.wait_for(ws.recv(), 1.0))
+              assert state["health"]["lidar"]["ok"] is False
+              assert "no lidar" in state["health"]["lidar"]["error"]
+              assert state["health"]["stm"]["ok"] is True
+              assert state["vel"] is not None  # the STM32 side keeps working
+              allow_lidar.set()
+              await wait_for(lambda: lidar_dev.health()["ok"])
+              assert lidar_dev.health()["restarts"] >= 2
+              await ws.send(_cmd(seq=3, vx=0.1))
+              await wait_for(lambda: stm_dev.latest.vx_mps > 0.0)  # writer still drives the sim
+      finally:
+          for task in tasks:
+              task.cancel()
+          await asyncio.gather(*tasks, return_exceptions=True)
+          await srv.close()
+          await asyncio.to_thread(writer.stop)
+
+
+  async def test_stalled_device_is_restarted():
+      created = []
+
+      class Frozen:
+          def __init__(self) -> None:
+              self.latest = SimpleNamespace(t_ns=1)
+              self.stopped = False
+
+          def start(self) -> None:
+              pass
+
+          def stop(self) -> None:
+              self.stopped = True
+
+      def factory() -> Frozen:
+          created.append(Frozen())
+          return created[-1]
+
+      device = agent.SupervisedDevice(
+          "stm",
+          factory,
+          agent._latest_stamp,
+          stale_s=0.1,
+          backoff_s=0.01,
+          max_backoff_s=0.02,
+          poll_s=0.01,
+      )
+      task = asyncio.ensure_future(device.run())
+      try:
+          await wait_for(lambda: len(created) >= 2)
+      finally:
+          task.cancel()
+          await asyncio.gather(task, return_exceptions=True)
+      assert created[0].stopped is True
+      assert device.restarts >= 1
+      assert device.latest is None  # no source is exposed once supervision ended
+      assert created[-1].stopped is True
+
+
+  async def test_device_without_source_is_safe_for_the_writer():
+      device = agent.SupervisedDevice("stm", sim.SimulatedStm32, agent._latest_stamp, stale_s=1.0)
+      assert device.latest is None
+      assert device.latest_aux is None
+      with pytest.raises(RuntimeError):
+          device.send_velocity(0.0, 0.0, 0.0)
+      assert device.health()["ok"] is False
+
+
+  async def test_bind_retries_until_the_address_is_available():
+      class FlakyServer:
+          def __init__(self) -> None:
+              self.attempts = 0
+
+          async def start(self, host, port):
+              self.attempts += 1
+              if self.attempts < 3:
+                  raise OSError(99, "Cannot assign requested address")
+              return 4321
+
+      fake = FlakyServer()
+      port = await asyncio.wait_for(
+          agent.bind_with_retry(fake, "100.69.39.18", 8765, delay_s=0.001, max_delay_s=0.002), 3.0
+      )
+      assert port == 4321
+      assert fake.attempts == 3
+  ```
+
+  **Bước 8. Kiểm tra (chạy từ `/home/vth/ws/mecanum_base`, báo output nguyên văn từng lệnh).**
+  1. `.venv/bin/pytest -v` -> mong đợi `73 passed`, 0 failed, 0 error, không có warning (44 test robot cũ + 28 test mới ở `robot/tests/test_robot.py` + 1 ở `app/server/tests/test_server.py`), tổng dưới 5 giây. Nếu tổng khác 73 nhưng không có fail, báo số thực tế và không sửa. Nếu có fail do code trong Work order, trả `BLOCKED` kèm tên test và lỗi, không tự sửa thiết kế.
+  2. Chạy lại 5 lần: `for i in 1 2 3 4 5; do .venv/bin/pytest robot/tests -p no:cacheprovider 2>&1 | tail -1; done` -> cả 5 dòng là `72 passed in ...s`.
+  3. `grep -nE "time\.sleep" robot/tests/test_robot.py` -> không có dòng nào (exit 1).
+  4. `grep -rnE "1\.89|TaskGroup|tomllib|except\*|asyncio\.timeout|AstraSSource|Astra" robot/robot_agent/config.py robot/robot_agent/sim.py robot/robot_agent/server.py robot/robot_agent/__main__.py` -> không có dòng nào (exit 1).
+  5. `.venv/bin/python -c "import robot_agent.sim, robot_agent.config; import sys; print('serial' in sys.modules)"` -> in `False` (sim/config không kéo thư viện phần cứng).
+  6. Token rỗng bị từ chối: `ROBOT_LINK_TOKEN= ROBOT_SIMULATE=true timeout 10 .venv/bin/python -m robot_agent; echo "rc=$?"` -> in `robot_agent: ROBOT_LINK_TOKEN is empty: refusing to start without a link token` rồi `rc=2`. (Chỉ đúng khi repo chưa có file `.env` chứa token; nếu có `.env` với token mà biến môi trường rỗng vẫn thắng nên kết quả không đổi.)
+  7. Chạy thật ở chế độ mô phỏng, chứng minh client nhận `state` và thoát sạch khi SIGTERM (lệnh dưới được giới hạn bằng `timeout -s KILL 30`). Chạy nguyên khối này bằng `bash`:
+  ```bash
+  set -u
+  PY=.venv/bin/python
+  PORT=$($PY -c "import socket;s=socket.socket();s.bind(('127.0.0.1',0));print(s.getsockname()[1])")
+  LOG=$(mktemp)
+  ROBOT_SIMULATE=true ROBOT_LINK_TOKEN=test ROBOT_BIND_HOST=127.0.0.1 ROBOT_BIND_PORT=$PORT \
+    timeout -s KILL 30 $PY -m robot_agent >"$LOG" 2>&1 &
+  PID=$!
+  $PY - "$PORT" <<'PYEOF'
+  import asyncio, json, sys, time
+  from websockets.asyncio.client import connect
+
+  async def main(port):
+      deadline = time.monotonic() + 10
+      while True:
+          try:
+              ws = await connect(f"ws://127.0.0.1:{port}/ws", additional_headers={"Authorization": "Bearer test"})
+              break
+          except OSError:
+              if time.monotonic() > deadline:
+                  raise SystemExit("FAIL: server never came up")
+              await asyncio.sleep(0.1)
+      async with ws:
+          state = json.loads(await asyncio.wait_for(ws.recv(), 3))
+          assert state["t"] == "state", state
+          for _ in range(100):
+              state = json.loads(await asyncio.wait_for(ws.recv(), 3))
+              if state["health"]["stm"]["ok"] and state["health"]["lidar"]["ok"]:
+                  break
+          else:
+              raise SystemExit("FAIL: devices never became ok")
+          print("OK state", sorted(state), state["health"])
+
+  asyncio.run(main(int(sys.argv[1])))
+  PYEOF
+  CLIENT=$?
+  kill -TERM $PID
+  wait $PID
+  RC=$?
+  echo "client_exit=$CLIENT agent_exit=$RC"
+  cat "$LOG"
+  rm -f "$LOG"
+  ```
+  Mong đợi: một dòng `OK state ['charge', 'flag_stop', 'health', 'imu', 'last_cmd_seq', 't', 't_mono_ns', 'vel', 'voltage'] {...}` với `stm` và `lidar` đều `'ok': True`; `client_exit=0 agent_exit=0`; log có `listening on 127.0.0.1:<port>`, `shutting down`, `server closed`, và không có `Traceback` hay `final zero velocity could not be written`. (Dòng `writer ... 'healthy': False, 'error_count': 1` thoáng qua ngay sau khởi động là bình thường.) Nếu `agent_exit` khác 0 hoặc có `Traceback`, trả `BLOCKED` kèm log.
+  8. `grep -c "" deploy/robot-agent.service && grep -nE "^(Restart|ExecStart|EnvironmentFile|WorkingDirectory)=" deploy/robot-agent.service` -> thấy `Restart=on-failure`, `ExecStart=/opt/mecanum_base/.venv/bin/python -m robot_agent`, `EnvironmentFile=/opt/mecanum_base/.env`, `WorkingDirectory=/opt/mecanum_base`.
+  9. `git status --short` (chỉ đọc) -> chỉ có: ` M pyproject.toml`, ` M robot/tests/test_robot.py`, `?? deploy/`, `?? robot/robot_agent/__main__.py`, `?? robot/robot_agent/config.py`, `?? robot/robot_agent/server.py`, `?? robot/robot_agent/sim.py` (cộng ` M .claude/task/task.md` nếu Opus chưa commit nó). File nào khác xuất hiện thì báo.
+
+  **Trả về:** danh sách file đã tạo/sửa, output nguyên văn của 9 lệnh, mọi điểm bạn phải dừng. Không commit.
+
+  **Mâu thuẫn/điểm mở cho Opus (Sonnet nêu, Haiku không xử lý):**
+  1. Ba tài liệu không mâu thuẫn nhau về T04. Điểm cần chú ý: PROTO-2 chỉ nêu `t_mono_ns` và `last_cmd_seq` cho state lên; Work order chốt các tên trường còn lại theo PROTO-1 (xem "Quyết định thiết kế"). T06 phải đọc đúng các tên này; nếu muốn tên khác thì sửa spec PROTO-2 trước.
+  2. `t_mono_ns` là thời điểm mẫu STM32 (để odometry PHY-7 tích phân đúng), không phải lúc gửi; khi telemetry đứng thì `t_mono_ns` đứng theo. Nếu T06/T14 cần đo độ trễ vòng lệnh bằng thời điểm gửi thì phải thêm trường riêng.
+  3. `cmd_vel` xuống robot được kiểm tra chặt: đúng 5 khóa. Message có thêm `src` (PROTO-1 dành cho web) sẽ bị bỏ; T06 phải bỏ `src` khi chuyển tiếp xuống robot.
+  4. `last_cmd_seq` chỉ cập nhật khi writer chấp nhận lệnh (không phải khi lệnh bị loại do SAF-04); NFR-02 đo độ trễ vòng lệnh dựa vào đó.
+  5. Đường dẫn cài trên Jetson chưa biết: `deploy/robot-agent.service` dùng `/opt/mecanum_base` (đã ghi chú trong file, xác nhận ở T15; `User=` đang để chú thích `CHANGE_ME`). `RestartPreventExitStatus=2` ngăn vòng lặp khởi động lại khi cấu hình sai token.
+  6. Ngoài danh sách yêu cầu: `ROBOT_BIND_HOST` không đặt thì mặc định `127.0.0.1` và địa chỉ đại diện bị từ chối; tin nhắn > 1024 byte làm đóng kết nối (mã 1009); ping 2 s/timeout 2 s để phát hiện peer chết.
+  7. Writer có thể báo `healthy: False`/1 lỗi trong khoảng 0.2 s đầu vì STM32 chưa chạy khi writer ghi lần đầu; tự hết sau lần thử lại. Đó là hành vi mong muốn (writer độc lập với thiết bị).
+  8. `AstraSSource` vẫn nằm trong `hardware.py` nhưng không được import hay khởi động ở đâu trong T04 (D-07).
+  9. Test dùng `from robot_agent import __main__ as agent`: import module `__main__` của gói không chạy `main()` (có bảo vệ `__name__`).
 
 ## P2 — App server
 
