@@ -52,7 +52,17 @@ mecanum_base/
       ├─ app/                  # layout.tsx + trang FR-01 (mỗi trang một page.tsx)
       ├─ robot/
       │  ├─ protocol.ts        # kiểu message
-      │  ├─ store.ts           # WS, state, phân xử nguồn lệnh, vòng gửi 20 Hz
+      │  ├─ control.ts         # logic thuần: phím thành vector, phân xử nguồn lệnh
+      │  ├─ control.test.ts
+      │  ├─ store.ts           # WS, state, vòng gửi 20 Hz
+      │  ├─ telemetry.ts       # logic thuần: độ trễ, bộ đệm quỹ đạo, phát hiện mất dữ liệu
+      │  ├─ telemetry.test.ts
+      │  ├─ forward.ts         # động học thuận: phân tích số nhập, chuỗi tính, chạy theo thời gian
+      │  ├─ forward.test.ts
+      │  ├─ inverse.ts         # động học ngược: đích, tiến độ, bộ chạy tới đích
+      │  ├─ inverse.test.ts
+      │  ├─ dynamics.ts        # nguồn cấp động lực học và bộ đệm lịch sử
+      │  ├─ dynamics.test.ts
       │  ├─ keyboard.tsx       # bàn phím toàn cục (gắn ở root layout)
       │  ├─ mecanum.ts         # công thức PHY-1..PHY-5
       │  ├─ motion.ts          # chạy động học thuận và bộ bám đích PHY-6
@@ -94,6 +104,8 @@ Vòng lặp mỗi task:
 5. Tối đa hai vòng sửa; sau đó Opus xử lý hoặc hỏi người dùng. **Chỉ khi `PASS`, Opus mới merge** và cập nhật trạng thái.
 
 Giữa mỗi giai đoạn, Opus kiểm tra đối chiếu chéo: mọi mã spec có task, mọi task trỏ tới mã tồn tại.
+
+**Ngoại lệ cho P4 (T09–T13, theo yêu cầu người dùng 2026-11-09):** Sonnet 5.5 medium viết code trực tiếp, không qua Work order và Haiku. Một agent Sonnet khác đối chứng theo cả ba file; đạt mới merge.
 
 ### Git-flow (NFR-07)
 
