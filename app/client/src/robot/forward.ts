@@ -3,8 +3,8 @@
 // Không dùng React hay DOM.
 
 import { exceedsSpeedSum, forwardKinematics, bodyToWorld, wheelResidual, R } from "./mecanum";
-import type { BodyVel, Wheels } from "./mecanum";
-import { createWheelRun, wheelRunStep } from "./motion";
+import type { BodyVel, Pose, Wheels } from "./mecanum";
+import { createWheelRun, wheelRunStep, wrapAngle } from "./motion";
 import type { WheelRun } from "./motion";
 import type { EndReason, RunDriver, RunEnd } from "./control";
 
@@ -37,6 +37,77 @@ export function parseWheels(texts: readonly string[]): Wheels | null {
   if (![b.vx, b.vy, b.wz].every(Number.isFinite)) return null;
   if (!Number.isFinite(wheelResidual(w))) return null;
   return w;
+}
+
+/**
+ * Như parseWheels nhưng ô để trống tính là 0, để kết quả đổi ngay khi gõ từng ô (không phải chờ đủ bốn ô).
+ * Ô sai (chữ, "-", quá lớn làm tràn) thì null.
+ */
+export function parseWheelsLive(texts: readonly string[]): Wheels | null {
+  return parseWheels(texts.map((t) => (t.trim() === "" ? "0" : t)));
+}
+
+export interface Motion {
+  /** Chiều dài đường đi (m). */
+  distance: number;
+  /** Góc xoay cộng dồn (rad), có dấu, không bị quấn về [-π, π]. */
+  turn: number;
+}
+
+/** Quãng đường tính toán khi giữ nguyên vận tốc thân trong durationS giây: |v|·T và wz·T. */
+export function plannedMotion(body: BodyVel, durationS: number): Motion {
+  return { distance: Math.hypot(body.vx, body.vy) * durationS, turn: body.wz * durationS };
+}
+
+/** Một bước nhảy tư thế lớn hơn mức này coi là odometry vừa bị reset, không cộng vào quãng đường. */
+const REBASE_JUMP_M = 1;
+
+/**
+ * Đo quãng đường thực tế từ tư thế odometry: cộng dồn chiều dài đường đi và góc xoay kể từ lúc start().
+ * Tích lũy từng mẫu nên đúng cả khi đi cung tròn hay xoay quá 180°.
+ */
+export class MotionMeter {
+  private last: Pose | null = null;
+  private distance = 0;
+  private turn = 0;
+  private running = false;
+
+  start(pose: Pose | null): void {
+    this.distance = 0;
+    this.turn = 0;
+    this.last = pose !== null && isFinitePose(pose) ? pose : null;
+    this.running = true;
+  }
+
+  update(pose: Pose | null): void {
+    if (!this.running || pose === null || !isFinitePose(pose)) return;
+    if (this.last === null) {
+      this.last = pose;
+      return;
+    }
+    const step = Math.hypot(pose.x - this.last.x, pose.y - this.last.y);
+    if (step <= REBASE_JUMP_M) {
+      this.distance += step;
+      this.turn += wrapAngle(pose.theta - this.last.theta);
+    }
+    this.last = pose;
+  }
+
+  stop(): void {
+    this.running = false;
+  }
+
+  get active(): boolean {
+    return this.running;
+  }
+
+  get(): Motion {
+    return { distance: this.distance, turn: this.turn };
+  }
+}
+
+function isFinitePose(p: Pose): boolean {
+  return Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.theta);
 }
 
 export interface Chain {
