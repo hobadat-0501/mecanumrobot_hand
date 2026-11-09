@@ -1145,7 +1145,7 @@ Trạng thái: `TODO → ORDERED → CODED → PASS → MERGED` hoặc `BLOCKED`
 
 
 ### T04 — WS server, cấu hình, mô phỏng
-- Trạng thái: CODED · Plan: P1 · Phụ thuộc: T03
+- Trạng thái: MERGED · Plan: P1 · Phụ thuộc: T03
 - Spec: FR-03, SAF-03, SAF-07, PROTO-2, NFR-03, NFR-06
 - File: `robot/robot_agent/{__main__,config,server,sim}.py`, `deploy/robot-agent.service`, `robot/tests/test_robot.py`, `pyproject.toml` (chỉ cấu hình pytest-asyncio)
 - Đạt khi: chạy `ROBOT_SIMULATE=true python -m robot_agent`; sai token bị từ chối; message không phải `cmd_vel` bị bỏ; mất link thì writer về 0; thiết bị lỗi được thử lại độc lập.
