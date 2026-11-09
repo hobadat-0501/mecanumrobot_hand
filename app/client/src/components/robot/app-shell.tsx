@@ -115,7 +115,7 @@ function StatusBar({ shell }: { shell: ShellSnapshot }) {
             onClick={() => emergencyStop()}
           >
             <OctagonX data-icon="inline-start" />
-            DỪNG KHẨN (X / Esc)
+            DỪNG KHẨN (Space)
           </Button>
         </div>
         <div
@@ -286,11 +286,8 @@ function ControlSettings({ shell }: { shell: ShellSnapshot }) {
           arm
         </span>
         <span className="flex items-center gap-1.5">
-          <KbdGroup>
-            <Kbd>X</Kbd>
-            <Kbd>Esc</Kbd>
-          </KbdGroup>
-          dừng và disarm
+          <Kbd>Space</Kbd>
+          dừng khẩn và disarm
         </span>
       </div>
     </section>

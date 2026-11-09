@@ -189,7 +189,7 @@ export default function Page() {
       <div>
         <h1 className="text-xl font-semibold tracking-tight">Động học ngược</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Chọn đích và thời gian: tốc độ thân và tốc độ bốn bánh được tính từ quãng đường chia thời gian. Bấm Space hoặc phím di chuyển để dừng.
+          Chọn đích và thời gian: tốc độ thân và tốc độ bốn bánh được tính từ quãng đường chia thời gian. Bấm Space để dừng khẩn (xe dừng và disarm).
         </p>
       </div>
 
@@ -230,7 +230,7 @@ export default function Page() {
                 Chạy
               </Button>
               <p className="text-sm text-muted-foreground">
-                Bấm <kbd className="rounded border bg-muted px-1.5 py-0.5 font-mono text-xs">Space</kbd> để dừng.
+                Bấm <kbd className="rounded border bg-muted px-1.5 py-0.5 font-mono text-xs">Space</kbd> để dừng khẩn (xe dừng và disarm).
               </p>
               <div className="ml-auto">
                 <StatusBadge tone={status.tone}>{status.text}</StatusBadge>

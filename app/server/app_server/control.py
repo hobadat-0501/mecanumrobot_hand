@@ -1,6 +1,7 @@
-"""Control core: arm state, driving rights, cmd_vel validation, watchdog.
+"""Control core: arm state, driving rights, cmd_vel validation, speed calibration, watchdog.
 
-cmd_vel passes through unchanged: web units and wire units are the same (SAF-01).
+The only place a command is divided by the calibration scale (SAF-01). The scale is the
+SPEED_SCALE setting (1.0 = no scaling); the web never sees it.
 No speed limit or clamp exists here (SAF-04).
 """
 
@@ -67,7 +68,9 @@ class ControlSession:
         operator_token: str,
         allowed_origins: Iterable[str],
         clock: Callable[[], float] = time.monotonic,
+        speed_scale: float = 1.0,
     ) -> None:
+        self._speed_scale = speed_scale
         self._token = operator_token
         self._origins = tuple(allowed_origins)
         self._clock = clock
@@ -136,7 +139,7 @@ class ControlSession:
         """Validate a cmd_vel.
 
         Raises ValueError if invalid. Returns None when not forwarded (disarmed or not the
-        driver). Otherwise returns {"seq","vx","vy","wz"} unchanged (FR-03).
+        driver). Otherwise returns {"seq","vx","vy","wz"} in wire units, divided by the scale (FR-03).
         """
         seq, vx, vy, wz = validate_cmd_vel(msg)
         if not self._armed or client_id != self._driver:
@@ -144,7 +147,8 @@ class ControlSession:
         self._last_cmd_at = self._clock()
         self._cmd_web = (vx, vy, wz)
         self._last_seq = seq
-        return {"seq": seq, "vx": vx, "vy": vy, "wz": wz}
+        k = self._speed_scale
+        return {"seq": seq, "vx": vx / k, "vy": vy / k, "wz": wz / k}
 
     def watchdog_tripped(self) -> bool:
         """True once when 250 ms passed since the last accepted command (T06 emits zero)."""
@@ -157,7 +161,7 @@ class ControlSession:
         return True
 
     def snapshot(self) -> Dict[str, Any]:
-        """Session part of the state message; the commanded velocity as sent."""
+        """Session part of the state message; web units (the commanded velocity before calibration)."""
         vx, vy, wz = self._cmd_web
         return {
             "armed": self._armed,

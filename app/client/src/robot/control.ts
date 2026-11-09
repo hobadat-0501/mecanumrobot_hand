@@ -79,7 +79,6 @@ export function isTypingTarget(target: FocusLike | null | undefined): boolean {
 export type KeyAction =
   | { kind: "motion"; code: string }
   | { kind: "arm" }
-  | { kind: "cancel" }
   | { kind: "stop" };
 
 export interface KeyContext {
@@ -89,13 +88,11 @@ export interface KeyContext {
   modifier: boolean;
 }
 
-/** FR-02: phím nhấn xuống thành hành động, hoặc null nếu bị bỏ qua. Esc luôn có hiệu lực. */
+/** FR-02: phím nhấn xuống thành hành động, hoặc null nếu bị bỏ qua. Space (dừng khẩn) luôn có hiệu lực. */
 export function decideKeyDown(code: string, ctx: KeyContext): KeyAction | null {
-  if (code === "Escape") return { kind: "stop" };
+  // Space là phím dừng khẩn duy nhất: dừng mọi nguồn lệnh, gửi 0 rồi disarm.
+  if (code === "Space") return { kind: "stop" };
   if (ctx.typing || ctx.modifier) return null;
-  // Space hủy lần chạy đang diễn ra (động học thuận/ngược), thay cho nút Dừng.
-  if (code === "Space") return { kind: "cancel" };
-  if (code === "KeyX") return { kind: "stop" };
   if (code === "KeyR") return { kind: "arm" };
   if (motionActionOf(code) !== null) return { kind: "motion", code };
   return null;

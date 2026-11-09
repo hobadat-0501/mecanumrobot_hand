@@ -13,7 +13,7 @@ kết nối xuống robot, web điều khiển bằng bàn phím, động học 
 |---|---|---|---|
 | D-01 | Robot là WS server, app server chủ động kết nối xuống | Theo yêu cầu; thay cho hướng robot gọi ra trước đây | PROTO-2, SAF-07 |
 | D-02 | App server dùng FastAPI + uvicorn; robot dùng `websockets`; không ROS/MQTT | Chỉ có ba thành phần, không cần broker | PROTO-1, PROTO-2 |
-| D-03 | Không dùng hệ số quy đổi: cmd_vel và telemetry giữ nguyên (đã bỏ 1.89) | Giảm sai lệch giữa lệnh, đo và odometry | SAF-01 |
+| D-03 | Hệ số hiệu chỉnh `SPEED_SCALE` đặt trong cấu hình app server, chia ở `control.py`, nhân lại ở `telemetry.py`; robot và web không biết hệ số | Một giá trị chỉnh được, đo bằng thước | SAF-01 |
 | D-04 | Động học, động lực học, bộ bám đích ở `mecanum.ts`/`motion.ts`; server chỉ làm odometry | Web chỉ gửi cmd_vel; không trùng công thức ở hai ngôn ngữ | FR-03, PHY-1..PHY-6, A-5 |
 | D-05 | Arm và quyền lái dừng ở app server; link robot chỉ có cmd_vel | Giữ quy tắc "chỉ cmd_vel" và vẫn disarm mặc định | SAF-02, FR-03 |
 | D-06 | Chế độ mô phỏng trên robot agent | Jetson đang offline, cần kiểm thử toàn tuyến | NFR-06 |
@@ -120,7 +120,7 @@ Giữa mỗi giai đoạn, Opus kiểm tra đối chiếu chéo: mọi mã spec 
 | # | Nội dung | Kết quả |
 |---|---|---|
 | 1 | Hình học (A-2) | `L`, `d` là kích thước toàn phần, `lever = 0.335` m |
-| 2 | Telemetry (A-1) | Giữ nguyên giá trị từ STM |
+| 2 | Telemetry (A-1) | Nhân lại `SPEED_SCALE` trước khi lên web |
 | 3 | Đích (A-3) | Dùng `x, y, θ`, không dùng `z` |
 | 4 | cmd_vel (A-5) | Web chỉ gửi cmd_vel, tính toán trên client |
 | 5 | Giới hạn (SAF-04) | Không đặt giới hạn tốc độ |

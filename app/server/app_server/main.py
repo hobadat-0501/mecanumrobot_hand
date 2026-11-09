@@ -118,8 +118,8 @@ def create_app(
     backoff_initial_s: float = 0.2,
     backoff_max_s: float = 2.0,
 ) -> FastAPI:
-    session = ControlSession(settings.operator_token, settings.allowed_origins, clock)
-    telemetry = Telemetry()
+    session = ControlSession(settings.operator_token, settings.allowed_origins, clock, settings.speed_scale)
+    telemetry = Telemetry(settings.speed_scale)
     hub = Hub()
     latest_scan: Dict[str, Any] = {"frame": None, "sent": None}
 

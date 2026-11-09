@@ -319,7 +319,7 @@ export function haltAll(reason: EndReason): void {
   publishShell();
 }
 
-/** Dừng khẩn (X, Esc, nút): 0 rồi disarm. */
+/** Dừng khẩn (Space, nút): 0 rồi disarm. */
 export function emergencyStop(): void {
   arbiter.releaseAll("stop");
   sendZeroNow();
