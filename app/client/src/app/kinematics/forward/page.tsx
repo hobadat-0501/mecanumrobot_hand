@@ -1,8 +1,9 @@
 "use client";
 
-// FR-04: động học thuận. Nhập 4 tốc độ bánh và thời gian chạy; chuỗi tính tính lại ngay khi đổi
-// số nhập. Số liệu từ store (θ, ω̇) đọc theo chu kỳ bằng usePolled, không nằm trong React state (NFR-03).
-// Nút Chạy chỉ gửi cmd_vel đã tính, qua startRun của store (FR-03).
+// FR-04: động học thuận. Nhập tốc độ 4 bánh (A, B, C, D) và thời gian chạy; vận tốc dài và quãng
+// đường tính toán đổi ngay theo từng ký tự gõ. Quãng đường thực tế đo từ odometry trong lúc chạy.
+// Nút Chạy chỉ gửi cmd_vel (vx, vy, wz) đã tính, qua startRun của store (FR-03).
+// Số liệu tần số cao nằm ngoài React state (NFR-03): MotionMeter cập nhật theo từng state.
 
 import { OctagonX, Play, TriangleAlert } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -23,19 +24,20 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   DEFAULT_DURATION_S,
+  MotionMeter,
   computeChain,
   createWheelDriver,
   describeRunEnd,
   parsePositive,
-  parseWheels,
+  parseWheelsLive,
+  plannedMotion,
   runBlockReason,
 } from "@/robot/forward";
-import type { WheelDriver } from "@/robot/forward";
-import { DynamicsEstimator, FILTER_TAU, LEVER, R, SPEED_SUM_LIMIT } from "@/robot/mecanum";
+import type { Motion, WheelDriver } from "@/robot/forward";
+import { LEVER, SPEED_SUM_LIMIT } from "@/robot/mecanum";
 import {
   cancelRun,
   getTelemetry,
-  getTelemetryAt,
   startRun,
   subscribeTelemetry,
   useShell,
@@ -43,78 +45,60 @@ import {
 
 const RAD_TO_DEG = 180 / Math.PI;
 const WHEEL_NAMES = ["A", "B", "C", "D"] as const;
-const WHEEL_SIGNS = ["ε +, s −", "ε −, s −", "ε +, s +", "ε −, s +"] as const;
-
-/**
- * ω̇ = đạo hàm của wz đo được (vel.wz trong state), lọc thông thấp bậc 1 với hằng số
- * thời gian FILTER_TAU (PHY-4, PHY-5). Cập nhật theo từng state, giữ ngoài React state.
- */
-function useWzDot(): () => number | null {
-  const est = useRef(new DynamicsEstimator());
-  const value = useRef<number | null>(null);
-  const lastAt = useRef<number | null>(null);
-  useEffect(() => {
-    const e = est.current;
-    const off = subscribeTelemetry(() => {
-      const s = getTelemetry();
-      const at = getTelemetryAt();
-      if (s === null || s.vel === null || !Number.isFinite(s.vel.wz)) {
-        e.reset();
-        value.current = null;
-        lastAt.current = null;
-        return;
-      }
-      if (lastAt.current === at) return;
-      const dt = lastAt.current === null ? 0 : (at - lastAt.current) / 1000;
-      lastAt.current = at;
-      value.current = e.update(s.vel, [0, 0, 0, 0], dt).wzDot;
-    });
-    return off;
-  }, []);
-  return useCallback(() => value.current, []);
-}
-
-function Step({ index, title, children }: { index: number; title: string; children: React.ReactNode }) {
-  return (
-    <section className="rounded-lg border bg-background p-3">
-      <h3 className="flex items-center gap-2 text-sm font-medium">
-        <span className="grid size-5 place-items-center rounded-full bg-muted text-xs tabular-nums">
-          {index}
-        </span>
-        {title}
-      </h3>
-      <div className="mt-2">{children}</div>
-    </section>
-  );
-}
 
 export default function ForwardPage() {
   const shell = useShell();
-  const state = usePolled(getTelemetry, 100);
-  const wzDot = usePolled(useWzDot(), 100);
   const data = dataStateOf(shell);
   const dim = data !== "live";
 
   const [wheelText, setWheelText] = useState<[string, string, string, string]>(["", "", "", ""]);
   const [durationText, setDurationText] = useState(String(DEFAULT_DURATION_S));
   const [startFailed, setStartFailed] = useState(false);
+  // Quãng đường tính toán của lần chạy gần nhất (chốt lúc bấm Chạy) để so với thực tế.
+  const [runPlan, setRunPlan] = useState<Motion | null>(null);
 
-  const wheels = useMemo(() => parseWheels(wheelText), [wheelText]);
+  // Tính lại ngay ở mỗi lần render, tức mỗi ký tự gõ: ô trống tính là 0, ô sai thì chưa tính.
+  const wheels = useMemo(() => parseWheelsLive(wheelText), [wheelText]);
   const duration = parsePositive(durationText);
-  const theta = state?.pose.theta ?? null;
-  const chain = useMemo(() => (wheels === null ? null : computeChain(wheels, theta)), [wheels, theta]);
+  const chain = useMemo(() => (wheels === null ? null : computeChain(wheels, null)), [wheels]);
+  const planned = useMemo(
+    () => (chain === null || duration === null ? null : plannedMotion(chain.body, duration)),
+    [chain, duration],
+  );
+  const speed = chain === null ? null : Math.hypot(chain.body.vx, chain.body.vy);
+
+  // Đo quãng đường thực tế từ odometry: cộng dồn theo từng state, chỉ trong lúc chạy.
+  const meter = useRef(new MotionMeter());
+  useEffect(
+    () =>
+      subscribeTelemetry(() => {
+        meter.current.update(getTelemetry()?.pose ?? null);
+      }),
+    [],
+  );
+  const actual = usePolled(useCallback(() => meter.current.get(), []), 100);
+  const measured = usePolled(useCallback(() => meter.current.active || meter.current.get().distance > 0, []), 100);
 
   const driver = useRef<WheelDriver | null>(null);
   const remaining = usePolled(
-    useCallback(() => driver.current === null ? null : { left: driver.current.remaining(), total: driver.current.durationS }, []),
+    useCallback(
+      () => (driver.current === null ? null : { left: driver.current.remaining(), total: driver.current.durationS }),
+      [],
+    ),
     100,
   );
   const running = shell.source === "forward";
   const end = describeRunEnd(shell.lastRunEnd);
 
+  // Hết lần chạy (xong hoặc bị hủy) thì chốt số đo.
+  useEffect(() => {
+    if (!running) meter.current.stop();
+  }, [running]);
+
   // Rời trang thì hủy lần chạy của trang này (cancelRun không làm gì nếu đã xong).
   useEffect(
     () => () => {
+      meter.current.stop();
       if (driver.current !== null) cancelRun();
     },
     [],
@@ -132,10 +116,14 @@ export default function ForwardPage() {
   });
 
   const onRun = () => {
-    if (wheels === null || duration === null) return;
+    if (wheels === null || duration === null || planned === null) return;
     const d = createWheelDriver(wheels, duration);
     driver.current = d;
-    setStartFailed(!startRun(d, "forward"));
+    meter.current.start(getTelemetry()?.pose ?? null);
+    setRunPlan(planned);
+    const ok = startRun(d, "forward");
+    if (!ok) meter.current.stop();
+    setStartFailed(!ok);
   };
 
   const setWheel = (i: number, text: string) => {
@@ -146,14 +134,16 @@ export default function ForwardPage() {
     });
   };
 
-  const invalid = (text: string) => text.trim() !== "" && parseWheels([text, "0", "0", "0"]) === null;
+  const invalid = (text: string) => text.trim() !== "" && parseWheelsLive([text, "0", "0", "0"]) === null;
+  const deviation =
+    actual !== null && runPlan !== null && measured ? actual.distance - runPlan.distance : null;
 
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-4">
       <div>
         <h1 className="text-xl font-semibold tracking-tight">Động học thuận</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Nhập tốc độ 4 bánh, xem chuỗi tính tới vận tốc thân và đạo hàm tư thế, rồi chạy trong thời gian giới hạn.
+          Nhập tốc độ bốn bánh để xem vận tốc dài và quãng đường sẽ đi được, rồi chạy và so với quãng đường thực tế.
         </p>
       </div>
 
@@ -161,13 +151,13 @@ export default function ForwardPage() {
 
       <div className="grid gap-4 lg:grid-cols-5">
         <div className="flex flex-col gap-4 lg:col-span-2">
-          <Panel title="Đầu vào" description="Tốc độ bánh (rad/s), dương là quay tiến. Ô trống hoặc sai thì chưa tính.">
+          <Panel title="Đầu vào" description="Tốc độ bốn bánh (rad/s), dương là quay tiến. Ô trống tính là 0.">
             <div className="grid grid-cols-2 gap-3">
               {WHEEL_NAMES.map((name, i) => (
                 <div key={name} className="flex flex-col gap-1.5">
                   <Label htmlFor={`w-${name}`} className="justify-between">
-                    <span>{`ω_${name}`}</span>
-                    <span className="text-xs font-normal text-muted-foreground">{WHEEL_SIGNS[i]}</span>
+                    <span>{name}</span>
+                    <span className="text-xs font-normal text-muted-foreground">rad/s</span>
                   </Label>
                   <Input
                     id={`w-${name}`}
@@ -182,7 +172,10 @@ export default function ForwardPage() {
                 </div>
               ))}
               <div className="col-span-2 flex flex-col gap-1.5">
-                <Label htmlFor="duration">Thời gian chạy (s)</Label>
+                <Label htmlFor="duration" className="justify-between">
+                  <span>Thời gian chạy</span>
+                  <span className="text-xs font-normal text-muted-foreground">giây</span>
+                </Label>
                 <Input
                   id="duration"
                   inputMode="decimal"
@@ -198,7 +191,7 @@ export default function ForwardPage() {
 
           <Panel
             title="Chạy"
-            description="Gửi cmd_vel (vx, vy, wz) đã tính, giữ nguyên tới hết giờ rồi gửi 0."
+            description="Gửi vận tốc đã tính, giữ nguyên tới hết giờ rồi gửi 0."
             action={
               running ? (
                 <StatusBadge tone="ok">Đang chạy</StatusBadge>
@@ -262,77 +255,79 @@ export default function ForwardPage() {
               <TriangleAlert />
               <AlertTitle>Tổng tốc độ vượt {SPEED_SUM_LIMIT} m/s</AlertTitle>
               <AlertDescription>
-                |vx| + |vy| + {fmt(LEVER, 3)}·|wz| = {fmt(Math.abs(chain.body.vx) + Math.abs(chain.body.vy) + LEVER * Math.abs(chain.body.wz), 3)} m/s.
+                |vx| + |vy| + {fmt(LEVER, 3)}·|wz| ={" "}
+                {fmt(Math.abs(chain.body.vx) + Math.abs(chain.body.vy) + LEVER * Math.abs(chain.body.wz), 3)} m/s.
                 Chỉ cảnh báo, không chặn lệnh.
               </AlertDescription>
             </Alert>
           ) : null}
 
-          <Panel title="Chuỗi tính" description="Tính lại ngay khi đổi số nhập (PHY-3, PHY-4).">
-            <div className="flex flex-col gap-3">
-              <Step index={1} title="Tốc độ bánh ω_i">
-                <ReadoutGrid cols={4}>
-                  {WHEEL_NAMES.map((n, i) => (
-                    <Readout
-                      key={n}
-                      label={`ω_${n}`}
-                      value={fmt(wheels?.[i], 3)}
-                      unit="rad/s"
-                    />
-                  ))}
+          <Panel title="Vận tốc dài" description="Tính lại ngay khi gõ. Đây cũng là lệnh sẽ gửi khi bấm Chạy.">
+            <ReadoutGrid cols={4}>
+              <Readout label="vx (tiến)" value={fmt(chain?.body.vx, 4)} unit="m/s" />
+              <Readout label="vy (ngang trái)" value={fmt(chain?.body.vy, 4)} unit="m/s" />
+              <Readout label="Tốc độ |v|" value={fmt(speed, 4)} unit="m/s" />
+              <Readout label="Tốc độ xoay wz" value={fmt(chain?.body.wz, 4)} unit="rad/s" />
+            </ReadoutGrid>
+            {chain === null ? (
+              <p className="mt-2 text-xs text-muted-foreground">Có ô nhập chưa phải số hợp lệ nên chưa tính.</p>
+            ) : chain.residualNonZero ? (
+              <div className="mt-3">
+                <StatusBadge tone="warn">Bốn bánh không nhất quán: các bánh đánh nhau, xe sẽ trượt bánh</StatusBadge>
+              </div>
+            ) : null}
+          </Panel>
+
+          <Panel
+            title="Quãng đường"
+            description="Tính toán = vận tốc × thời gian chạy. Thực tế = đo từ odometry của robot trong lúc chạy."
+          >
+            <div className="grid gap-4 sm:grid-cols-2">
+              <section>
+                <h3 className="text-sm font-medium">Tính toán</h3>
+                <ReadoutGrid cols={2} className="mt-2">
+                  <Readout label="Quãng đường" value={fmt(planned?.distance, 3)} unit="m" />
+                  <Readout label="Góc xoay" value={fmt(planned === null ? null : planned.turn * RAD_TO_DEG, 1)} unit="°" />
                 </ReadoutGrid>
-              </Step>
-              <Step index={2} title={`Vận tốc dài vành bánh v_i = r·ω_i (r = ${R} m)`}>
-                <ReadoutGrid cols={4}>
-                  {WHEEL_NAMES.map((n, i) => (
-                    <Readout key={n} label={`v_${n}`} value={fmt(chain?.rim[i], 4)} unit="m/s" />
-                  ))}
-                </ReadoutGrid>
-              </Step>
-              <Step index={3} title="Vận tốc thân (vx, vy, wz): chính là cmd_vel sẽ gửi">
-                <ReadoutGrid cols={3}>
-                  <Readout label="vx" value={fmt(chain?.body.vx, 4)} unit="m/s" />
-                  <Readout label="vy" value={fmt(chain?.body.vy, 4)} unit="m/s" />
-                  <Readout label="wz" value={fmt(chain?.body.wz, 4)} unit="rad/s" />
-                </ReadoutGrid>
-              </Step>
-              <Step index={4} title="Khung thế giới theo θ hiện tại (dx/dt, dy/dt, dθ/dt = wz)">
-                <ReadoutGrid cols={4}>
-                  <Readout label="θ (đo)" value={fmt(theta === null ? null : theta * RAD_TO_DEG, 1)} unit="°" dim={dim} />
-                  <Readout label="dx/dt" value={fmt(chain?.world?.xDot, 4)} unit="m/s" dim={dim} />
-                  <Readout label="dy/dt" value={fmt(chain?.world?.yDot, 4)} unit="m/s" dim={dim} />
-                  <Readout label="dθ/dt" value={fmt(chain?.world?.thetaDot, 4)} unit="rad/s" />
-                </ReadoutGrid>
-                {theta === null ? (
-                  <p className="mt-2 text-xs text-muted-foreground">Chưa có tư thế từ app server nên chưa đổi sang khung thế giới.</p>
-                ) : null}
-              </Step>
-              <Step index={5} title="Gia tốc góc dω/dt (ω̇) đo được">
-                <ReadoutGrid cols={2}>
-                  <Readout label="dω/dt (đạo hàm wz đo, đã lọc)" value={fmt(wzDot, 3)} unit="rad/s²" dim={dim} />
-                  <Readout label="wz đo" value={fmt(state?.vel?.wz, 3)} unit="rad/s" dim={dim} />
-                </ReadoutGrid>
-                <p className="mt-2 text-xs text-muted-foreground">
-                  dω/dt là đạo hàm theo thời gian của wz đo từ robot, qua bộ lọc thông thấp bậc 1 (τ = {FILTER_TAU} s).
-                  Đây là giá trị đo, không phải giá trị tính từ ô nhập.
-                </p>
-              </Step>
-              <Step index={6} title="Thành phần dư e = r/4·(ω_A − ω_B − ω_C + ω_D)">
-                <div className="flex flex-wrap items-center gap-4">
+              </section>
+              <section>
+                <h3 className="flex items-center gap-2 text-sm font-medium">
+                  Thực tế
+                  {running ? <StatusBadge tone="ok">đang đo</StatusBadge> : null}
+                </h3>
+                <ReadoutGrid cols={2} className="mt-2">
                   <Readout
-                    label="e"
-                    value={fmt(chain?.residual, 5)}
-                    unit="m/s"
-                    tone={chain === null ? "idle" : chain.residualNonZero ? "warn" : "ok"}
+                    label="Quãng đường"
+                    value={measured ? fmt(actual?.distance, 3) : "—"}
+                    unit="m"
+                    dim={dim && !running}
                   />
-                  {chain === null ? null : chain.residualNonZero ? (
-                    <StatusBadge tone="warn">Khác 0: các bánh đánh nhau, robot sẽ trượt bánh</StatusBadge>
-                  ) : (
-                    <StatusBadge tone="ok">Bằng 0: bốn bánh nhất quán</StatusBadge>
-                  )}
-                </div>
-              </Step>
+                  <Readout
+                    label="Góc xoay"
+                    value={measured && actual ? fmt(actual.turn * RAD_TO_DEG, 1) : "—"}
+                    unit="°"
+                    dim={dim && !running}
+                  />
+                </ReadoutGrid>
+              </section>
             </div>
+            {deviation !== null ? (
+              <p className="mt-3 text-sm text-muted-foreground">
+                So với lần chạy đã bấm (tính toán {fmt(runPlan?.distance, 3)} m): lệch{" "}
+                <span className="font-medium tabular-nums text-foreground">
+                  {deviation >= 0 ? "+" : ""}
+                  {fmt(deviation, 3)} m
+                </span>
+                {runPlan !== null && runPlan.distance > 1e-6
+                  ? ` (${deviation >= 0 ? "+" : ""}${fmt((deviation / runPlan.distance) * 100, 1)}%)`
+                  : ""}
+                .
+              </p>
+            ) : null}
+            <p className="mt-2 text-xs text-muted-foreground">
+              Quãng đường thực tế là chiều dài đường đi cộng dồn từ odometry, nên chính xác bằng độ chính xác của
+              odometry (cộng dồn từ vận tốc đo), không phải số đo bằng thước.
+            </p>
           </Panel>
         </div>
       </div>
