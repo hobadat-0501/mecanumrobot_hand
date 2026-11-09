@@ -208,7 +208,7 @@ export default function ForwardPage() {
                 Chạy
               </Button>
               <p className="self-center text-sm text-muted-foreground">
-                Bấm <kbd className="rounded border bg-muted px-1.5 py-0.5 font-mono text-xs">Space</kbd> để dừng.
+                Bấm <kbd className="rounded border bg-muted px-1.5 py-0.5 font-mono text-xs">Space</kbd> để dừng khẩn (xe dừng và disarm).
               </p>
             </div>
             {block !== null && !running ? (

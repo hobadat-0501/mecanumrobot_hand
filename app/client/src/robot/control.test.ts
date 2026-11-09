@@ -129,8 +129,9 @@ describe("decideKeyDown (FR-02)", () => {
       code: "ArrowLeft",
     });
     expect(decideKeyDown("KeyR", NO_MODIFIER)).toEqual({ kind: "arm" });
-    expect(decideKeyDown("KeyX", NO_MODIFIER)).toEqual({ kind: "stop" });
-    expect(decideKeyDown("Escape", NO_MODIFIER)).toEqual({ kind: "stop" });
+    expect(decideKeyDown("Space", NO_MODIFIER)).toEqual({ kind: "stop" });
+    expect(decideKeyDown("KeyX", NO_MODIFIER)).toBeNull();
+    expect(decideKeyDown("Escape", NO_MODIFIER)).toBeNull();
   });
 
   it("đang gõ chữ thì bỏ qua phím di chuyển, R và X nhưng Esc vẫn dừng", () => {
@@ -138,21 +139,18 @@ describe("decideKeyDown (FR-02)", () => {
     expect(decideKeyDown("KeyW", typing)).toBeNull();
     expect(decideKeyDown("ArrowUp", typing)).toBeNull();
     expect(decideKeyDown("KeyR", typing)).toBeNull();
-    expect(decideKeyDown("KeyX", typing)).toBeNull();
-    expect(decideKeyDown("Escape", typing)).toEqual({ kind: "stop" });
+    expect(decideKeyDown("Space", typing)).toEqual({ kind: "stop" });
   });
 
   it("giữ Ctrl, Meta hoặc Alt thì bỏ qua (Ctrl+R không được arm), Esc vẫn dừng", () => {
     const modifier = { typing: false, modifier: true };
     expect(decideKeyDown("KeyR", modifier)).toBeNull();
     expect(decideKeyDown("KeyW", modifier)).toBeNull();
-    expect(decideKeyDown("Escape", modifier)).toEqual({ kind: "stop" });
+    expect(decideKeyDown("Space", modifier)).toEqual({ kind: "stop" });
   });
 
   it("phím khác bị bỏ qua", () => {
     expect(decideKeyDown("KeyZ", NO_MODIFIER)).toBeNull();
-    expect(decideKeyDown("Space", NO_MODIFIER)).toEqual({ kind: "cancel" });
-    expect(decideKeyDown("Space", { typing: true, modifier: false })).toBeNull();
   });
 });
 
