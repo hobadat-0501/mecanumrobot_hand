@@ -3274,11 +3274,1583 @@ Trạng thái: `TODO → ORDERED → CODED → PASS → MERGED` hoặc `BLOCKED`
   5. Kiểm tra: `/home/vth/ws/mecanum_base/.venv/bin/pytest app/server` phải báo `67 passed`; `/home/vth/ws/mecanum_base/.venv/bin/pytest` phải báo `111 passed`.
 
 ### T06 — Link robot, telemetry, WS operator
-- Trạng thái: TODO · Plan: P2 · Phụ thuộc: T04, T05
+- Trạng thái: CODED · Plan: P2 · Phụ thuộc: T04, T05
 - Spec: FR-08, FR-12, SAF-01, SAF-03, PROTO-1, PROTO-2, PHY-7, NFR-03
 - File: `app/server/app_server/{main,robot_link,telemetry}.py`, `app/server/tests/test_server.py`
 - Đạt khi: nối được robot mô phỏng, tự kết nối lại; quá 250 ms không có lệnh hoặc operator rớt thì gửi 0; state tới web ≤ 20 Hz và theo đơn vị web; odometry khớp test vector; không payload nào lộ hệ số.
-- Work order: _(Sonnet điền)_
+- Work order:
+
+  **Quy tắc cao nhất, theo thứ tự:** chỉ sửa đúng 4 file liệt kê dưới đây. Thiếu thông tin hoặc có mâu thuẫn thì dừng và trả `BLOCKED` kèm câu hỏi. Không chạy `git commit` (và không chạy lệnh git nào làm thay đổi repo). Không thiết kế thêm: chép nguyên văn nội dung file.
+
+  File được sửa (thư mục làm việc là gốc worktree):
+  1. `app/server/app_server/robot_link.py` (tạo mới)
+  2. `app/server/app_server/telemetry.py` (tạo mới)
+  3. `app/server/app_server/main.py` (tạo mới)
+  4. `app/server/tests/test_server.py` (giữ nguyên toàn bộ test cũ, sửa khối import ở đầu file và thêm khối test mới ở cuối file)
+
+  Không sửa `control.py`, `config.py`, `pyproject.toml`, `.env.example`, `__init__.py`. Mọi thư viện cần dùng (`fastapi`, `uvicorn`, `websockets`, `httpx`, `pytest-asyncio`) đã có trong `.venv`.
+
+  Các khối code dưới đây thụt vào 2 dấu cách vì nằm trong danh sách Markdown: **bỏ đúng 2 dấu cách đầu mỗi dòng** khi ghi ra file (file Python bắt đầu ở cột 0). Code đã được Sonnet chạy thử trên bản sao ngoài repo bằng `.venv` của repo: `pytest app/server` báo 116 passed, ổn định qua nhiều lần chạy, kể cả khi CPU bận; đã thử đột biến (bỏ disarm khi mất link, bỏ watchdog) thì test tương ứng FAIL.
+
+  Thiết kế (đã chốt, không đổi):
+  - Robot link: một ô lệnh duy nhất (bản mới thay bản cũ), lệnh chỉ gửi khi link đang nối, bị bỏ khi link rớt và không bao giờ phát lại sau khi nối lại (SAF-03). Tin gửi xuống đúng 5 khóa `t, seq, vx, vy, wz` (`src` bị bỏ). Nối lại với back-off 0.2 s, nhân đôi tới tối đa 2 s. Mỗi lần nối được, app gửi ngay một `cmd_vel` 0.
+  - Telemetry: chỉ `vel` nhân với `CMD_VEL_DIVISOR` import từ `control.py` (đúng một chỗ nhân trong `telemetry.py`); IMU và các trường khác đi qua nguyên vẹn. Odometry theo PHY-7: tích phân trung điểm bằng `t_mono_ns` của robot, bỏ mẫu đầu, `dt <= 0`, `dt > 0.5 s`, vận tốc không hữu hạn; vẫn ghi nhớ thời gian mẫu bị bỏ để mẫu sau tích phân từ đó. `theta` quấn về `[-pi, pi)`. Không có `1.89`, không có hệ số và không có vận tốc wire trong bất kỳ payload nào tới web; `main.py` và `robot_link.py` không nhắc `CMD_VEL_DIVISOR`.
+  - Tin web gắn thẻ ở khóa `t` (như PROTO-2); `type` được chấp nhận làm bí danh. `state` gửi tới mỗi client tối đa 20 Hz qua hộp thư latest-only riêng từng client (client chậm chỉ trễ chính nó, không chặn client khác hay việc nhận lệnh). `state.session.role` là `driver` hoặc `viewer`, riêng từng client.
+  - Quyết định mất link robot (SAF-03): app server disarm, `state.link.robot` là `false`, telemetry robot bị xóa (pose giữ nguyên). Khi nối lại vẫn disarm, chỉ gửi 0 cho tới khi operator `arm` lại; `arm(true)` bị bỏ qua khi link robot đang rớt.
+  - Bắt buộc từ review T05: `session.disconnect` gọi trong `finally`; `ValueError` từ `handle_cmd_vel` chỉ bỏ tin đó; gửi `cmd_vel` 0 khi `disconnect`, `watchdog_tripped`, hoặc `arm(false)` trả `True`; watchdog chạy mỗi 50 ms. JSON hỏng, tin không phải object, tin quá 4096 ký tự, tin nhị phân đều bị bỏ qua, không làm sập handler. Viewer xem được nhưng `arm`, `cmd_vel`, `odom_reset` của viewer bị bỏ qua. Origin kiểm trước khi `accept` (sai hoặc thiếu: HTTP 403).
+  - `last_cmd_seq` trong `state` là của robot (đo độ trễ NFR-02); `cmd` trong `state` lấy từ `session.snapshot()` theo đơn vị web.
+
+  **File 1: `app/server/app_server/robot_link.py`** (chép nguyên văn)
+
+  ```python
+  """WebSocket client from the app server down to the robot (PROTO-2).
+
+  Connects to ROBOT_WS_URL with `Authorization: Bearer <token>` and reconnects forever with
+  back-off. The only thing sent down is `cmd_vel` with exactly the keys t, seq, vx, vy, wz in
+  wire units. Outbound commands are latest-only: one slot, newer replaces older, so no backlog
+  can build up (NFR-03). A command is never stored while the link is down or carried across a
+  reconnect (SAF-03). Incoming `state` messages are handed to `on_state`; binary frames are
+  ignored until T13.
+  """
+
+  from __future__ import annotations
+
+  import asyncio
+  import json
+  import logging
+  from typing import Any, Callable, Dict, Optional
+
+  from websockets.asyncio.client import connect
+
+  log = logging.getLogger("app_server.robot_link")
+
+  MAX_MESSAGE_BYTES = 1 << 20
+
+
+  class RobotLink:
+      def __init__(
+          self,
+          url: str,
+          token: str,
+          *,
+          on_state: Callable[[Dict[str, Any]], None],
+          on_connect: Optional[Callable[[], None]] = None,
+          on_disconnect: Optional[Callable[[], None]] = None,
+          backoff_initial_s: float = 0.2,
+          backoff_max_s: float = 2.0,
+          ping_interval_s: float = 2.0,
+          ping_timeout_s: float = 2.0,
+          open_timeout_s: float = 3.0,
+      ) -> None:
+          self._url = url
+          self._headers = {"Authorization": "Bearer " + token}
+          self._on_state = on_state
+          self._on_connect = on_connect
+          self._on_disconnect = on_disconnect
+          self._backoff_initial_s = backoff_initial_s
+          self._backoff_max_s = backoff_max_s
+          self._ping_interval_s = ping_interval_s
+          self._ping_timeout_s = ping_timeout_s
+          self._open_timeout_s = open_timeout_s
+          self._connected = False
+          self._ws: Any = None
+          self._pending: Optional[str] = None
+          self._wake = asyncio.Event()
+          self._last_seq = 0
+
+      @property
+      def connected(self) -> bool:
+          return self._connected
+
+      @property
+      def latency_s(self) -> Optional[float]:
+          """Round-trip time of the last WebSocket ping, or None when unknown."""
+          ws = self._ws
+          if ws is None:
+              return None
+          value = getattr(ws, "latency", 0.0)
+          return float(value) if value and value > 0 else None
+
+      def send_cmd_vel(self, seq: int, vx: float, vy: float, wz: float) -> bool:
+          """Queue the newest cmd_vel (wire units), replacing any unsent one.
+
+          Returns False and drops the command when the link is down.
+          """
+          if not self._connected:
+              return False
+          self._last_seq = seq
+          self._pending = json.dumps(
+              {"t": "cmd_vel", "seq": seq, "vx": vx, "vy": vy, "wz": wz},
+              separators=(",", ":"),
+          )
+          self._wake.set()
+          return True
+
+      def send_zero(self) -> bool:
+          """Queue a zero cmd_vel that replaces any unsent command."""
+          return self.send_cmd_vel(self._last_seq, 0.0, 0.0, 0.0)
+
+      def _notify(self, callback: Optional[Callable[[], None]]) -> None:
+          if callback is None:
+              return
+          try:
+              callback()
+          except Exception:
+              log.exception("robot link callback failed")
+
+      async def run(self) -> None:
+          """Connect, serve until the link drops, back off, repeat. Cancel to stop."""
+          delay = self._backoff_initial_s
+          while True:
+              try:
+                  async with connect(
+                      self._url,
+                      additional_headers=self._headers,
+                      compression=None,
+                      max_size=MAX_MESSAGE_BYTES,
+                      ping_interval=self._ping_interval_s,
+                      ping_timeout=self._ping_timeout_s,
+                      open_timeout=self._open_timeout_s,
+                  ) as ws:
+                      delay = self._backoff_initial_s
+                      await self._session(ws)
+              except asyncio.CancelledError:
+                  raise
+              except Exception as exc:
+                  log.info("robot link: %s: %s", type(exc).__name__, exc)
+              await asyncio.sleep(delay)
+              delay = min(delay * 2, self._backoff_max_s)
+
+      async def _session(self, ws: Any) -> None:
+          self._ws = ws
+          self._pending = None
+          self._wake.clear()
+          self._connected = True
+          sender = asyncio.ensure_future(self._send_loop(ws))
+          receiver = asyncio.ensure_future(self._receive_loop(ws))
+          try:
+              self._notify(self._on_connect)
+              await asyncio.wait({sender, receiver}, return_when=asyncio.FIRST_COMPLETED)
+          finally:
+              self._connected = False
+              self._ws = None
+              self._pending = None
+              self._notify(self._on_disconnect)
+              sender.cancel()
+              receiver.cancel()
+              await asyncio.gather(sender, receiver, return_exceptions=True)
+
+      async def _send_loop(self, ws: Any) -> None:
+          while True:
+              await self._wake.wait()
+              self._wake.clear()
+              text, self._pending = self._pending, None
+              if text is not None:
+                  await ws.send(text)
+
+      async def _receive_loop(self, ws: Any) -> None:
+          async for message in ws:
+              if not isinstance(message, str):
+                  continue  # binary scan frames arrive in T13
+              try:
+                  data = json.loads(message)
+              except (ValueError, RecursionError):
+                  continue
+              if isinstance(data, dict) and data.get("t") == "state":
+                  try:
+                      self._on_state(data)
+                  except Exception:
+                      log.exception("robot state handler failed")
+  ```
+
+  **File 2: `app/server/app_server/telemetry.py`** (chép nguyên văn)
+
+  ```python
+  """Telemetry: scale robot velocity to web units, odometry (PHY-7), build the web `state`.
+
+  SAF-01: only `vel` is multiplied by CMD_VEL_DIVISOR (the same constant control.py divides by).
+  IMU and every other field pass through unscaled. Nothing built here carries the factor or a
+  wire-unit velocity, so the web only ever sees web units.
+  """
+
+  from __future__ import annotations
+
+  import math
+  from typing import Any, Dict, Optional
+
+  from .control import CMD_VEL_DIVISOR
+
+  MAX_DT_S = 0.5  # PHY-7: samples further apart than this are not integrated
+  _NS_PER_S = 1e9
+  _IMU_KEYS = ("ax", "ay", "az", "gx", "gy", "gz")
+
+
+  def _finite(value: Any) -> bool:
+      if isinstance(value, bool) or not isinstance(value, (int, float)):
+          return False
+      try:
+          return math.isfinite(value)
+      except OverflowError:
+          return False
+
+
+  def _finite_dict(data: Any, keys: Any) -> Optional[Dict[str, float]]:
+      """{key: float} when `data` is a dict with every key a finite number, else None."""
+      if not isinstance(data, dict):
+          return None
+      out: Dict[str, float] = {}
+      for key in keys:
+          if not _finite(data.get(key)):
+              return None
+          out[key] = float(data[key])
+      return out
+
+
+  def _wrap_angle(theta: float) -> float:
+      return (theta + math.pi) % (2.0 * math.pi) - math.pi
+
+
+  class Odometry:
+      """Pose (x, y, theta) in the odometry frame, integrated with the midpoint heading."""
+
+      def __init__(self) -> None:
+          self.x = 0.0
+          self.y = 0.0
+          self.theta = 0.0
+          self._last_t_ns: Optional[int] = None
+
+      def reset(self) -> None:
+          self.x = 0.0
+          self.y = 0.0
+          self.theta = 0.0
+          self._last_t_ns = None
+
+      def forget_time(self) -> None:
+          """Keep the pose but treat the next sample as the first one."""
+          self._last_t_ns = None
+
+      def update(self, t_ns: int, vx: float, vy: float, wz: float) -> bool:
+          """Integrate one sample (web units, robot t_mono_ns). True when the pose moved.
+
+          The first sample, dt <= 0, dt > MAX_DT_S and non-finite velocities are skipped; the
+          sample time is still remembered so the following sample integrates from it.
+          """
+          last = self._last_t_ns
+          self._last_t_ns = t_ns
+          if last is None:
+              return False
+          dt = (t_ns - last) / _NS_PER_S
+          if dt <= 0.0 or dt > MAX_DT_S:
+              return False
+          if not (_finite(vx) and _finite(vy) and _finite(wz)):
+              return False
+          mid = self.theta + 0.5 * wz * dt
+          cos_mid = math.cos(mid)
+          sin_mid = math.sin(mid)
+          self.x += (vx * cos_mid - vy * sin_mid) * dt
+          self.y += (vx * sin_mid + vy * cos_mid) * dt
+          self.theta = _wrap_angle(self.theta + wz * dt)
+          return True
+
+      def pose(self) -> Dict[str, float]:
+          return {"x": self.x, "y": self.y, "theta": self.theta}
+
+
+  class Telemetry:
+      """Latest robot telemetry in web units plus odometry; builds the PROTO-1 `state`."""
+
+      def __init__(self) -> None:
+          self.odometry = Odometry()
+          self._clear_robot_fields()
+
+      def _clear_robot_fields(self) -> None:
+          self._vel: Optional[Dict[str, float]] = None
+          self._imu: Optional[Dict[str, float]] = None
+          self._voltage: Optional[float] = None
+          self._flag_stop: Any = None
+          self._charge: Any = None
+          self._health: Any = None
+          self._last_cmd_seq: Optional[int] = None
+
+      def clear_robot(self) -> None:
+          """The robot link dropped: forget its telemetry (the pose is kept)."""
+          self._clear_robot_fields()
+          self.odometry.forget_time()
+
+      def reset_odometry(self) -> None:
+          self.odometry.reset()
+
+      def on_robot_state(self, msg: Dict[str, Any]) -> None:
+          """Take one robot `state` message (PROTO-2)."""
+          raw_vel = _finite_dict(msg.get("vel"), ("vx", "vy", "wz"))
+          if raw_vel is None:
+              self._vel = None
+          else:
+              self._vel = {key: value * CMD_VEL_DIVISOR for key, value in raw_vel.items()}
+          t_ns = msg.get("t_mono_ns")
+          if self._vel is not None and isinstance(t_ns, int) and not isinstance(t_ns, bool):
+              self.odometry.update(t_ns, self._vel["vx"], self._vel["vy"], self._vel["wz"])
+          self._imu = _finite_dict(msg.get("imu"), _IMU_KEYS)
+          voltage = msg.get("voltage")
+          self._voltage = float(voltage) if _finite(voltage) else None
+          self._flag_stop = msg.get("flag_stop")
+          charge = msg.get("charge")
+          self._charge = charge if isinstance(charge, dict) else None
+          health = msg.get("health")
+          self._health = health if isinstance(health, dict) else None
+          seq = msg.get("last_cmd_seq")
+          valid_seq = isinstance(seq, int) and not isinstance(seq, bool)
+          self._last_cmd_seq = seq if valid_seq else None
+
+      def build_state(
+          self,
+          session: Dict[str, Any],
+          robot_connected: bool,
+          rtt_s: Optional[float] = None,
+      ) -> Dict[str, Any]:
+          """The web `state` (PROTO-1). `session` is ControlSession.snapshot() (web units)."""
+          rtt_ms = round(rtt_s * 1000.0, 1) if rtt_s is not None else None
+          return {
+              "t": "state",
+              "link": {"robot": robot_connected, "rtt_ms": rtt_ms},
+              "session": {"armed": session["armed"], "has_driver": session["has_driver"]},
+              "vel": dict(self._vel) if self._vel is not None else None,
+              "pose": self.odometry.pose(),
+              "cmd": dict(session["cmd"]),
+              "imu": dict(self._imu) if self._imu is not None else None,
+              "voltage": self._voltage,
+              "flag_stop": self._flag_stop,
+              "charge": self._charge,
+              "health": self._health,
+              "last_cmd_seq": self._last_cmd_seq,
+          }
+  ```
+
+  **File 3: `app/server/app_server/main.py`** (chép nguyên văn)
+
+  ```python
+  """App server: FastAPI app with the operator WebSocket (PROTO-1) and a health endpoint.
+
+  Wires ControlSession (arm, driving rights, unit conversion), RobotLink (WS client down to the
+  robot) and Telemetry (scaling, odometry, state). State goes to each web client at most
+  STATE_HZ times per second through a latest-only per-client mailbox, so a slow client only
+  ever lags itself (NFR-03). Run with `python -m app_server.main`.
+  """
+
+  from __future__ import annotations
+
+  import asyncio
+  import json
+  import logging
+  import time
+  import uuid
+  from contextlib import asynccontextmanager
+  from types import SimpleNamespace
+  from typing import Any, Callable, Dict, Mapping, Optional
+
+  import uvicorn
+  from fastapi import FastAPI, WebSocket
+
+  from .config import Settings, load_settings
+  from .control import ControlSession
+  from .robot_link import RobotLink
+  from .telemetry import Telemetry
+
+  log = logging.getLogger("app_server")
+
+  STATE_HZ = 20.0
+  WATCHDOG_TICK_S = 0.05
+  MAX_MESSAGE_CHARS = 4096
+  WS_MAX_SIZE_BYTES = 65536
+
+
+  class Client:
+      """One connected web client with a latest-only outbox and its own sender task."""
+
+      def __init__(self, client_id: str, ws: Any) -> None:
+          self.client_id = client_id
+          self._ws = ws
+          self._latest: Optional[str] = None
+          self._event = asyncio.Event()
+          self._task = asyncio.ensure_future(self._run())
+
+      def offer(self, text: str) -> None:
+          """Replace the unsent state with `text`. Never blocks."""
+          self._latest = text
+          self._event.set()
+
+      def close(self) -> None:
+          self._task.cancel()
+
+      async def _run(self) -> None:
+          try:
+              while True:
+                  await self._event.wait()
+                  self._event.clear()
+                  text, self._latest = self._latest, None
+                  if text is not None:
+                      await self._ws.send_text(text)
+          except asyncio.CancelledError:
+              raise
+          except Exception:
+              return  # the peer is gone; the receive loop ends the connection
+
+
+  class Hub:
+      """The set of web clients; publishing never waits for any of them."""
+
+      def __init__(self) -> None:
+          self._clients: Dict[str, Client] = {}
+
+      def __len__(self) -> int:
+          return len(self._clients)
+
+      def add(self, client_id: str, ws: Any) -> Client:
+          client = Client(client_id, ws)
+          self._clients[client_id] = client
+          return client
+
+      def remove(self, client_id: str) -> None:
+          client = self._clients.pop(client_id, None)
+          if client is not None:
+              client.close()
+
+      def publish(self, state: Dict[str, Any], role_of: Callable[[str], Optional[str]]) -> None:
+          """Offer `state` to every client, adding that client's own role under `session`."""
+          for client in list(self._clients.values()):
+              payload = dict(state)
+              payload["session"] = dict(state["session"], role=role_of(client.client_id))
+              client.offer(json.dumps(payload, separators=(",", ":")))
+
+
+  def create_app(
+      settings: Settings,
+      *,
+      clock: Callable[[], float] = time.monotonic,
+      state_hz: float = STATE_HZ,
+      watchdog_tick_s: float = WATCHDOG_TICK_S,
+      backoff_initial_s: float = 0.2,
+      backoff_max_s: float = 2.0,
+  ) -> FastAPI:
+      session = ControlSession(settings.operator_token, settings.allowed_origins, clock)
+      telemetry = Telemetry()
+      hub = Hub()
+
+      def on_link_up() -> None:
+          link.send_zero()  # a fresh link always starts at zero, whatever happened before
+
+      def on_link_down() -> None:
+          telemetry.clear_robot()
+          if session.armed and session.driver is not None:
+              session.arm(session.driver, False)  # SAF-03: stay disarmed until re-armed
+
+      link = RobotLink(
+          settings.robot_ws_url,
+          settings.robot_link_token,
+          on_state=telemetry.on_robot_state,
+          on_connect=on_link_up,
+          on_disconnect=on_link_down,
+          backoff_initial_s=backoff_initial_s,
+          backoff_max_s=backoff_max_s,
+      )
+
+      def build_state() -> Dict[str, Any]:
+          return telemetry.build_state(session.snapshot(), link.connected, link.latency_s)
+
+      async def broadcast_loop() -> None:
+          loop = asyncio.get_running_loop()
+          period = 1.0 / state_hz
+          due = loop.time()
+          while True:
+              hub.publish(build_state(), session.role)
+              due += period
+              now = loop.time()
+              if due < now:
+                  due = now  # fell behind: skip ahead, never burst above the rate limit
+              await asyncio.sleep(due - now)
+
+      async def watchdog_loop() -> None:
+          while True:
+              if session.watchdog_tripped():
+                  link.send_zero()
+              await asyncio.sleep(watchdog_tick_s)
+
+      def handle_text(client_id: str, text: str) -> None:
+          if len(text) > MAX_MESSAGE_CHARS:
+              return
+          try:
+              msg = json.loads(text)
+          except (ValueError, RecursionError):
+              return
+          if not isinstance(msg, dict):
+              return
+          kind = msg.get("t", msg.get("type"))
+          if kind == "hello":
+              session.hello(client_id, msg.get("token"))
+          elif kind == "cmd_vel":
+              try:
+                  wire = session.handle_cmd_vel(client_id, msg)
+              except ValueError:
+                  return  # drop only this message
+              if wire is not None:
+                  link.send_cmd_vel(wire["seq"], wire["vx"], wire["vy"], wire["wz"])
+          elif kind == "arm":
+              on = msg.get("on")
+              if on is True and not link.connected:
+                  return  # no arming without a robot link
+              if session.arm(client_id, on) and on is False:
+                  link.send_zero()
+          elif kind == "odom_reset":
+              if session.role(client_id) == "driver":
+                  telemetry.reset_odometry()
+
+      @asynccontextmanager
+      async def lifespan(_app: FastAPI):
+          tasks = [
+              asyncio.ensure_future(link.run()),
+              asyncio.ensure_future(broadcast_loop()),
+              asyncio.ensure_future(watchdog_loop()),
+          ]
+          try:
+              yield
+          finally:
+              for task in tasks:
+                  task.cancel()
+              await asyncio.gather(*tasks, return_exceptions=True)
+
+      app = FastAPI(lifespan=lifespan)
+      app.state.runtime = SimpleNamespace(session=session, link=link, telemetry=telemetry, hub=hub)
+
+      @app.get("/health")
+      async def health() -> Dict[str, Any]:
+          return {"ok": True, "robot_link": link.connected, "clients": len(hub)}
+
+      @app.websocket("/ws/operator")
+      async def operator(ws: WebSocket) -> None:
+          client_id = uuid.uuid4().hex
+          if not session.connect(client_id, ws.headers.get("origin")):
+              await ws.close(code=1008)  # refused before accept
+              return
+          try:
+              await ws.accept()
+              hub.add(client_id, ws)
+              while True:
+                  message = await ws.receive()
+                  if message["type"] == "websocket.disconnect":
+                      break
+                  text = message.get("text")
+                  if text is not None:
+                      handle_text(client_id, text)
+          finally:
+              hub.remove(client_id)
+              if session.disconnect(client_id):
+                  link.send_zero()
+
+      return app
+
+
+  def main(env: Optional[Mapping[str, str]] = None) -> None:
+      settings = load_settings(env)
+      logging.basicConfig(level=logging.INFO)
+      uvicorn.run(
+          create_app(settings),
+          host=settings.bind_host,
+          port=settings.bind_port,
+          ws_max_size=WS_MAX_SIZE_BYTES,
+          log_level="info",
+      )
+
+
+  if __name__ == "__main__":
+      main()
+  ```
+
+  **File 4: `app/server/tests/test_server.py`** (hai thao tác, không đụng phần giữa)
+
+  Thao tác 4a: thay khối import ở đầu file. Văn bản cũ phải khớp chính xác (15 dòng đầu của file, không thêm không bớt); nếu không khớp thì trả `BLOCKED`.
+
+  Văn bản cũ:
+
+  ```python
+  import math
+
+  import pytest
+
+  from app_server import control
+  from app_server.config import ConfigError, load_settings
+  from app_server.control import (
+      CMD_VEL_DIVISOR,
+      ControlSession,
+      origin_allowed,
+      to_wire_units,
+      token_matches,
+      validate_cmd_vel,
+  )
+  ```
+
+  Văn bản mới (thay đúng khối trên; sau đó vẫn là một dòng trống rồi `ORIGIN = "http://100.119.83.63:3000"` như cũ):
+
+  ```python
+  import asyncio
+  import json
+  import math
+  import time
+  from contextlib import asynccontextmanager
+  from http import HTTPStatus
+  from types import SimpleNamespace
+
+  import httpx
+  import pytest
+  import uvicorn
+  from websockets.asyncio.client import connect
+  from websockets.asyncio.server import serve
+  from websockets.exceptions import ConnectionClosed, InvalidStatus
+  from websockets.protocol import State
+
+  from app_server import control
+  from app_server import main as app_main
+  from app_server import telemetry as telemetry_module
+  from app_server.config import ConfigError, load_settings
+  from app_server.control import (
+      CMD_VEL_DIVISOR,
+      ControlSession,
+      origin_allowed,
+      to_wire_units,
+      token_matches,
+      validate_cmd_vel,
+  )
+  from app_server.main import Hub, create_app
+  from app_server.robot_link import RobotLink
+  from app_server.telemetry import Odometry, Telemetry
+  ```
+
+  Thao tác 4b: thêm vào **cuối file**, sau test cuối cùng hiện có (`test_validate_cmd_vel_rejects_overflowing_int`), đúng khối sau (bắt đầu bằng hai dòng trống rồi dòng chú thích `# ====`). Không dùng `import` mới ở giữa file; mọi import đã nằm ở khối 4a.
+
+  ```python
+  # ======================================================================================
+  # T06: odometry, telemetry, robot link, operator WebSocket
+  # ======================================================================================
+
+  LINK_TOKEN = "link"
+  OPERATOR_TOKEN = "secret"
+  NS = 1_000_000_000
+  STEP_NS = 100_000_000  # 0.1 s
+  WIRE_VEL = (0.1234, 0.0567, 0.0891)  # distinctive wire-unit values sent by the fake robot
+
+
+  def robot_state(t_ns=0, vel=WIRE_VEL, seq=None):
+      """A robot `state` message as PROTO-2 describes it (velocities in wire units)."""
+      return {
+          "t": "state",
+          "t_mono_ns": t_ns,
+          "last_cmd_seq": seq,
+          "vel": None if vel is None else {"vx": vel[0], "vy": vel[1], "wz": vel[2]},
+          "imu": {"ax": 0.01, "ay": 0.02, "az": 9.81, "gx": 0.003, "gy": 0.004, "gz": 0.005},
+          "voltage": 12.3,
+          "flag_stop": 0,
+          "charge": None,
+          "health": {
+              "stm": {"ok": True, "state": "ok", "error": None, "restarts": 0},
+              "lidar": {"ok": True, "state": "ok", "error": None, "restarts": 0},
+              "writer": {
+                  "running": True,
+                  "healthy": True,
+                  "error_count": 0,
+                  "last_error": None,
+                  "rejected_count": 0,
+              },
+          },
+      }
+
+
+  def is_zero(command):
+      return command["vx"] == 0 and command["vy"] == 0 and command["wz"] == 0
+
+
+  async def wait_until(condition, timeout=3.0, step=0.01):
+      deadline = time.monotonic() + timeout
+      while time.monotonic() < deadline:
+          if condition():
+              return
+          await asyncio.sleep(step)
+      raise AssertionError("condition not met in time")
+
+
+  # ---- odometry (PHY-7) ----
+
+
+  def test_odometry_first_sample_does_not_move():
+      o = Odometry()
+      assert o.update(5 * NS, 1.0, 1.0, 1.0) is False
+      assert o.pose() == {"x": 0.0, "y": 0.0, "theta": 0.0}
+
+
+  def test_odometry_straight_ahead():
+      o = Odometry()
+      o.update(0, 0.0, 0.0, 0.0)
+      assert o.update(STEP_NS, 0.5, 0.0, 0.0) is True
+      assert o.x == pytest.approx(0.05)
+      assert o.y == pytest.approx(0.0)
+      assert o.theta == pytest.approx(0.0)
+
+
+  def test_odometry_sideways_is_body_y():
+      o = Odometry()
+      o.update(0, 0.0, 0.0, 0.0)
+      o.update(STEP_NS, 0.0, 1.0, 0.0)
+      assert o.x == pytest.approx(0.0, abs=1e-12)
+      assert o.y == pytest.approx(0.1)
+
+
+  def test_odometry_midpoint_heading():
+      o = Odometry()
+      o.update(0, 0.0, 0.0, 0.0)
+      o.update(STEP_NS, 1.0, 0.0, 2.0)  # rotates 0.2 rad, heading used for motion is 0.1
+      assert o.theta == pytest.approx(0.2)
+      assert o.x == pytest.approx(0.1 * math.cos(0.1))
+      assert o.y == pytest.approx(0.1 * math.sin(0.1))
+
+
+  def test_odometry_body_to_world_when_rotated():
+      o = Odometry()
+      o.theta = math.pi / 2
+      o.update(0, 0.0, 0.0, 0.0)
+      o.update(STEP_NS, 1.0, 0.0, 0.0)  # body x points along world y
+      assert o.x == pytest.approx(0.0, abs=1e-12)
+      assert o.y == pytest.approx(0.1)
+      o.update(2 * STEP_NS, 0.0, 1.0, 0.0)  # body y points along world -x
+      assert o.x == pytest.approx(-0.1)
+      assert o.y == pytest.approx(0.1)
+
+
+  def test_odometry_accumulates_steps():
+      o = Odometry()
+      for i in range(11):
+          o.update(i * STEP_NS, 0.5, 0.0, 0.0)
+      assert o.x == pytest.approx(0.5)
+
+
+  @pytest.mark.parametrize("dt_ns", [0, -1_000_000, 500_000_001, 600_000_000, 5 * NS])
+  def test_odometry_skips_bad_dt(dt_ns):
+      o = Odometry()
+      o.update(10 * NS, 0.0, 0.0, 0.0)
+      assert o.update(10 * NS + dt_ns, 1.0, 1.0, 1.0) is False
+      assert o.pose() == {"x": 0.0, "y": 0.0, "theta": 0.0}
+
+
+  def test_odometry_dt_of_exactly_half_second_is_integrated():
+      o = Odometry()
+      o.update(0, 0.0, 0.0, 0.0)
+      assert o.update(500_000_000, 1.0, 0.0, 0.0) is True
+      assert o.x == pytest.approx(0.5)
+
+
+  def test_odometry_resumes_after_a_gap_from_the_skipped_sample():
+      o = Odometry()
+      o.update(0, 1.0, 0.0, 0.0)
+      assert o.update(1 * NS, 1.0, 0.0, 0.0) is False  # 1 s gap
+      assert o.update(1 * NS + STEP_NS, 1.0, 0.0, 0.0) is True  # dt 0.1 s, not 1.1 s
+      assert o.x == pytest.approx(0.1)
+
+
+  def test_odometry_resyncs_when_the_robot_clock_goes_backwards():
+      o = Odometry()
+      o.update(10 * NS, 1.0, 0.0, 0.0)
+      assert o.update(5 * NS, 1.0, 0.0, 0.0) is False
+      assert o.update(5 * NS + STEP_NS, 1.0, 0.0, 0.0) is True
+      assert o.x == pytest.approx(0.1)
+
+
+  @pytest.mark.parametrize("bad", [math.nan, math.inf])
+  def test_odometry_skips_non_finite_velocity(bad):
+      o = Odometry()
+      o.update(0, 0.0, 0.0, 0.0)
+      assert o.update(STEP_NS, bad, 0.0, 0.0) is False
+      assert o.pose() == {"x": 0.0, "y": 0.0, "theta": 0.0}
+
+
+  def test_odometry_theta_wraps():
+      o = Odometry()
+      o.update(0, 0.0, 0.0, 0.0)
+      o.update(STEP_NS, 0.0, 0.0, 40.0)  # +4 rad in one step
+      assert -math.pi <= o.theta < math.pi
+      assert o.theta == pytest.approx(math.atan2(math.sin(4.0), math.cos(4.0)))
+
+
+  def test_odometry_reset():
+      o = Odometry()
+      o.update(0, 1.0, 0.0, 1.0)
+      o.update(STEP_NS, 1.0, 0.0, 1.0)
+      assert o.x != 0.0
+      o.reset()
+      assert o.pose() == {"x": 0.0, "y": 0.0, "theta": 0.0}
+      assert o.update(2 * STEP_NS, 1.0, 0.0, 0.0) is False  # first sample after a reset
+
+
+  # ---- telemetry: web units, state shape (SAF-01, PROTO-1) ----
+
+  SNAPSHOT = {
+      "armed": False,
+      "has_driver": False,
+      "cmd": {"vx": 0.0, "vy": 0.0, "wz": 0.0},
+      "last_cmd_seq": None,
+  }
+
+
+  def test_telemetry_vel_is_multiplied_imu_is_not():
+      t = Telemetry()
+      t.on_robot_state(robot_state(vel=(0.1, 0.0, 0.0), seq=4))
+      state = t.build_state(SNAPSHOT, True)
+      assert state["vel"]["vx"] == pytest.approx(0.189)
+      assert state["vel"]["vy"] == 0.0
+      assert state["imu"] == {"ax": 0.01, "ay": 0.02, "az": 9.81, "gx": 0.003, "gy": 0.004,
+                              "gz": 0.005}
+      assert state["voltage"] == 12.3
+      assert state["flag_stop"] == 0
+      assert state["last_cmd_seq"] == 4
+      assert state["health"]["writer"]["running"] is True
+
+
+  def test_telemetry_state_has_exactly_the_proto1_fields():
+      state = Telemetry().build_state(SNAPSHOT, False)
+      assert set(state) == {"t", "link", "session", "vel", "pose", "cmd", "imu", "voltage",
+                            "flag_stop", "charge", "health", "last_cmd_seq"}
+      assert state["t"] == "state"
+      assert state["link"] == {"robot": False, "rtt_ms": None}
+      assert state["session"] == {"armed": False, "has_driver": False}
+      assert state["vel"] is None and state["imu"] is None
+      assert state["pose"] == {"x": 0.0, "y": 0.0, "theta": 0.0}
+
+
+  def test_telemetry_rtt_in_milliseconds():
+      assert Telemetry().build_state(SNAPSHOT, True, 0.0123)["link"]["rtt_ms"] == 12.3
+
+
+  def test_telemetry_ignores_malformed_fields():
+      t = Telemetry()
+      msg = robot_state()
+      msg["vel"] = {"vx": "fast", "vy": 0.0, "wz": 0.0}
+      msg["imu"] = {"ax": math.nan, "ay": 0, "az": 0, "gx": 0, "gy": 0, "gz": 0}
+      msg["voltage"] = math.inf
+      msg["last_cmd_seq"] = True
+      t.on_robot_state(msg)
+      state = t.build_state(SNAPSHOT, True)
+      assert state["vel"] is None and state["imu"] is None
+      assert state["voltage"] is None and state["last_cmd_seq"] is None
+      json.dumps(state, allow_nan=False)
+
+
+  def test_telemetry_odometry_uses_scaled_vel_and_robot_time():
+      t = Telemetry()
+      t.on_robot_state(robot_state(t_ns=0, vel=(0.5, 0.0, 0.0)))
+      t.on_robot_state(robot_state(t_ns=STEP_NS, vel=(0.5, 0.0, 0.0)))
+      t.on_robot_state(robot_state(t_ns=2 * STEP_NS, vel=(0.5, 0.0, 0.0)))
+      assert t.build_state(SNAPSHOT, True)["pose"]["x"] == pytest.approx(0.189)
+
+
+  def test_telemetry_clear_robot_keeps_pose_and_reset_clears_it():
+      t = Telemetry()
+      t.on_robot_state(robot_state(t_ns=0, vel=(0.5, 0.0, 0.0)))
+      t.on_robot_state(robot_state(t_ns=STEP_NS, vel=(0.5, 0.0, 0.0)))
+      t.clear_robot()
+      state = t.build_state(SNAPSHOT, False)
+      assert state["vel"] is None and state["imu"] is None and state["health"] is None
+      assert state["pose"]["x"] == pytest.approx(0.0945)
+      t.reset_odometry()
+      assert t.build_state(SNAPSHOT, False)["pose"] == {"x": 0.0, "y": 0.0, "theta": 0.0}
+
+
+  def test_telemetry_uses_the_control_constant_only():
+      import inspect
+
+      from app_server import robot_link
+
+      assert telemetry_module.CMD_VEL_DIVISOR is control.CMD_VEL_DIVISOR
+      assert inspect.getsource(telemetry_module).count("* CMD_VEL_DIVISOR") == 1
+      for module in (telemetry_module, app_main, robot_link):
+          source = inspect.getsource(module)
+          assert "1.89" not in source
+      for module in (app_main, robot_link):
+          assert "CMD_VEL_DIVISOR" not in inspect.getsource(module)
+
+
+  # ---- test doubles: a fake robot WebSocket server and the app under uvicorn ----
+
+
+  class FakeRobot:
+      """A robot WS server that records what the app sends and can push states."""
+
+      def __init__(self, token=LINK_TOKEN):
+          self.token = token
+          self.received = []
+          self.first_messages = []
+          self.auth_headers = []
+          self.connections = []
+          self.attempts = 0
+          self.refuse = False  # True: answer every handshake with 503
+          self.port = None
+          self._server = None
+
+      @property
+      def url(self):
+          return "ws://127.0.0.1:%d/ws" % self.port
+
+      def _process_request(self, connection, request):
+          self.attempts += 1
+          header = request.headers.get("Authorization")
+          self.auth_headers.append(header)
+          if self.refuse:
+              return connection.respond(HTTPStatus.SERVICE_UNAVAILABLE, "down\n")
+          if header != "Bearer " + self.token:
+              return connection.respond(HTTPStatus.UNAUTHORIZED, "unauthorized\n")
+          return None
+
+      async def _handler(self, conn):
+          self.connections.append(conn)
+          first = True
+          try:
+              async for message in conn:
+                  data = json.loads(message)
+                  if first:
+                      self.first_messages.append(data)
+                      first = False
+                  self.received.append(data)
+          except ConnectionClosed:
+              pass
+
+      async def start(self, port=0):
+          self._server = await serve(
+              self._handler, "127.0.0.1", port, process_request=self._process_request
+          )
+          self.port = self._server.sockets[0].getsockname()[1]
+
+      async def stop(self):
+          if self._server is not None:
+              self._server.close()
+              await self._server.wait_closed()
+              self._server = None
+
+      def live(self):
+          return [c for c in self.connections if c.state is State.OPEN]
+
+      async def drop(self):
+          for conn in self.live():
+              await conn.close()
+
+      async def send_state(self, message):
+          live = self.live()
+          if live:
+              await live[-1].send(json.dumps(message))
+
+      def cmds(self):
+          return [m for m in self.received if m.get("t") == "cmd_vel"]
+
+
+  @pytest.fixture
+  async def robot():
+      fake = FakeRobot()
+      await fake.start()
+      yield fake
+      await fake.stop()
+
+
+  @asynccontextmanager
+  async def running_app(robot_url, clock=None):
+      settings = load_settings(
+          {
+              "ROBOT_LINK_TOKEN": LINK_TOKEN,
+              "OPERATOR_TOKEN": OPERATOR_TOKEN,
+              "ROBOT_WS_URL": robot_url,
+              "APP_ALLOWED_ORIGINS": ORIGIN,
+          }
+      )
+      app = create_app(
+          settings, clock=clock or time.monotonic, backoff_initial_s=0.02, backoff_max_s=0.1
+      )
+      server = uvicorn.Server(
+          uvicorn.Config(
+              app,
+              host="127.0.0.1",
+              port=0,
+              log_level="warning",
+              lifespan="on",
+              timeout_graceful_shutdown=2,
+          )
+      )
+      task = asyncio.ensure_future(server.serve())
+      try:
+          deadline = time.monotonic() + 5.0
+          while not server.started:
+              if task.done():
+                  task.result()
+              if time.monotonic() > deadline:
+                  raise AssertionError("app server did not start")
+              await asyncio.sleep(0.01)
+          port = server.servers[0].sockets[0].getsockname()[1]
+          yield SimpleNamespace(
+              ws_url="ws://127.0.0.1:%d/ws/operator" % port,
+              http_url="http://127.0.0.1:%d" % port,
+              runtime=app.state.runtime,
+          )
+      finally:
+          server.should_exit = True
+          await asyncio.wait_for(task, 10)
+
+
+  @asynccontextmanager
+  async def operator(app, drive=True, origin=ORIGIN):
+      async with connect(app.ws_url, origin=origin) as ws:
+          if drive:
+              await send(ws, t="hello", token=OPERATOR_TOKEN)
+          yield ws
+
+
+  async def send(ws, **message):
+      await ws.send(json.dumps(message))
+
+
+  async def state_where(ws, predicate, timeout=3.0):
+      deadline = time.monotonic() + timeout
+      while True:
+          remaining = deadline - time.monotonic()
+          if remaining <= 0:
+              raise AssertionError("no matching state received")
+          message = json.loads(await asyncio.wait_for(ws.recv(), remaining))
+          if message.get("t") == "state" and predicate(message):
+              return message
+
+
+  async def arm_as_driver(ws, app):
+      await wait_until(lambda: app.runtime.link.connected)
+      await state_where(ws, lambda s: s["session"]["role"] == "driver" and s["link"]["robot"])
+      await send(ws, t="arm", on=True)
+      await state_where(ws, lambda s: s["session"]["armed"])
+
+
+  async def drain_states(ws, seconds):
+      """Every state received during the next `seconds`."""
+      states = []
+      deadline = time.monotonic() + seconds
+      while True:
+          remaining = deadline - time.monotonic()
+          if remaining <= 0:
+              return states
+          try:
+              message = json.loads(await asyncio.wait_for(ws.recv(), remaining))
+          except asyncio.TimeoutError:
+              return states
+          if message.get("t") == "state":
+              states.append(message)
+
+
+  def nonzero(robot):
+      return [c for c in robot.cmds() if not is_zero(c)]
+
+
+  def zeros(robot):
+      return [c for c in robot.cmds() if is_zero(c)]
+
+
+  def numbers_and_keys(value, key=""):
+      """Yield (key, number) for every numeric leaf and (key, None) for every dict key."""
+      if isinstance(value, dict):
+          for k, v in value.items():
+              yield k, None
+              yield from numbers_and_keys(v, k)
+      elif isinstance(value, list):
+          for v in value:
+              yield from numbers_and_keys(v, key)
+      elif isinstance(value, (int, float)) and not isinstance(value, bool):
+          yield key, value
+
+
+  def assert_web_units_only(texts, wire_values):
+      """No payload may hold a wire-unit value, the factor, its inverse, or a telling key."""
+      forbidden = tuple(wire_values) + (1.89, 1 / 1.89)
+      for text in texts:
+          assert "1.89" not in text
+          for key, number in numbers_and_keys(json.loads(text)):
+              assert not any(w in key.lower() for w in ("wire", "divisor", "factor", "scale"))
+              if number is not None:
+                  assert not any(math.isclose(number, f, rel_tol=1e-6) for f in forbidden)
+
+
+  # ---- Hub: a slow client must not block the others ----
+
+
+  class FakeWs:
+      def __init__(self, blocked=False):
+          self.sent = []
+          self.gate = asyncio.Event()
+          if not blocked:
+              self.gate.set()
+
+      async def send_text(self, text):
+          await self.gate.wait()
+          self.sent.append(text)
+
+
+  async def test_slow_client_gets_only_the_latest_and_blocks_nobody():
+      hub = Hub()
+      fast, slow = FakeWs(), FakeWs(blocked=True)
+      hub.add("fast", fast)
+      hub.add("slow", slow)
+      base = Telemetry().build_state(SNAPSHOT, True)
+      for n in range(1, 6):
+          hub.publish(dict(base, last_cmd_seq=n), lambda _cid: "viewer")
+          await asyncio.sleep(0.01)
+      assert [json.loads(t)["last_cmd_seq"] for t in fast.sent] == [1, 2, 3, 4, 5]
+      assert slow.sent == []
+      slow.gate.set()
+      await wait_until(lambda: len(slow.sent) == 2)
+      assert [json.loads(t)["last_cmd_seq"] for t in slow.sent] == [1, 5]  # in flight + latest
+      hub.remove("fast")
+      hub.remove("slow")
+
+
+  async def test_hub_adds_each_clients_own_role():
+      hub = Hub()
+      a, b = FakeWs(), FakeWs()
+      hub.add("a", a)
+      hub.add("b", b)
+      hub.publish(Telemetry().build_state(SNAPSHOT, True), {"a": "driver", "b": "viewer"}.get)
+      await wait_until(lambda: a.sent and b.sent)
+      assert json.loads(a.sent[0])["session"]["role"] == "driver"
+      assert json.loads(b.sent[0])["session"]["role"] == "viewer"
+      hub.remove("a")
+      hub.remove("b")
+
+
+  # ---- RobotLink ----
+
+
+  async def test_link_connects_with_bearer_and_sends_exact_keys(robot):
+      states = []
+      link = RobotLink(robot.url, LINK_TOKEN, on_state=states.append, backoff_initial_s=0.02)
+      task = asyncio.ensure_future(link.run())
+      try:
+          await wait_until(lambda: link.connected)
+          assert robot.auth_headers[-1] == "Bearer " + LINK_TOKEN
+          assert link.send_cmd_vel(3, 0.1, -0.2, 0.05) is True
+          await wait_until(lambda: robot.cmds())
+          assert robot.cmds()[0] == {"t": "cmd_vel", "seq": 3, "vx": 0.1, "vy": -0.2, "wz": 0.05}
+          await robot.send_state(robot_state(t_ns=7))
+          await wait_until(lambda: states)
+          assert states[0]["t_mono_ns"] == 7
+      finally:
+          task.cancel()
+          await asyncio.gather(task, return_exceptions=True)
+
+
+  async def test_link_keeps_only_the_latest_command(robot):
+      link = RobotLink(robot.url, LINK_TOKEN, on_state=lambda m: None, backoff_initial_s=0.02)
+      task = asyncio.ensure_future(link.run())
+      try:
+          await wait_until(lambda: link.connected)
+          for seq in range(1000):  # no await: the sender cannot run in between
+              link.send_cmd_vel(seq, 0.1, 0.0, 0.0)
+          await wait_until(lambda: robot.cmds())
+          await asyncio.sleep(0.05)
+          assert [c["seq"] for c in robot.cmds()] == [999]
+          link.send_cmd_vel(1000, 0.1, 0.0, 0.0)
+          link.send_zero()  # a zero replaces an unsent command
+          await wait_until(lambda: len(robot.cmds()) == 2)
+          await asyncio.sleep(0.05)
+          assert is_zero(robot.cmds()[1]) and len(robot.cmds()) == 2
+      finally:
+          task.cancel()
+          await asyncio.gather(task, return_exceptions=True)
+
+
+  async def test_link_reconnects_and_never_replays_an_old_command(robot):
+      events = []
+      link = RobotLink(
+          robot.url,
+          LINK_TOKEN,
+          on_state=lambda m: None,
+          on_connect=lambda: events.append("up"),
+          on_disconnect=lambda: events.append("down"),
+          backoff_initial_s=0.02,
+          backoff_max_s=0.1,
+      )
+      task = asyncio.ensure_future(link.run())
+      try:
+          await wait_until(lambda: link.connected)
+          await robot.drop()
+          await wait_until(lambda: "down" in events)
+          assert link.connected is False
+          assert link.send_cmd_vel(5, 0.1, 0.0, 0.0) is False  # dropped, not queued
+          await wait_until(lambda: link.connected)  # reconnected by itself
+          assert events == ["up", "down", "up"]
+          await asyncio.sleep(0.1)
+          assert robot.cmds() == []  # nothing from before the drop was replayed
+      finally:
+          task.cancel()
+          await asyncio.gather(task, return_exceptions=True)
+
+
+  async def test_link_retries_while_the_robot_is_unreachable():
+      fake = FakeRobot()
+      await fake.start()
+      port = fake.port
+      await fake.stop()
+      link = RobotLink(
+          "ws://127.0.0.1:%d/ws" % port,
+          LINK_TOKEN,
+          on_state=lambda m: None,
+          backoff_initial_s=0.02,
+          backoff_max_s=0.1,
+      )
+      task = asyncio.ensure_future(link.run())
+      try:
+          await asyncio.sleep(0.2)
+          assert link.connected is False
+          await fake.start(port=port)
+          await wait_until(lambda: link.connected, timeout=5.0)
+      finally:
+          task.cancel()
+          await asyncio.gather(task, return_exceptions=True)
+          await fake.stop()
+
+
+  async def test_link_with_wrong_token_never_connects():
+      fake = FakeRobot(token="other")
+      await fake.start()
+      link = RobotLink(fake.url, LINK_TOKEN, on_state=lambda m: None, backoff_initial_s=0.02)
+      task = asyncio.ensure_future(link.run())
+      try:
+          await wait_until(lambda: fake.attempts >= 3)  # it keeps retrying
+          assert link.connected is False
+          assert fake.live() == []
+      finally:
+          task.cancel()
+          await asyncio.gather(task, return_exceptions=True)
+          await fake.stop()
+
+
+  # ---- app server over a real socket ----
+
+
+  async def test_health_endpoint(robot):
+      async with running_app(robot.url) as app:
+          await wait_until(lambda: app.runtime.link.connected)
+          async with httpx.AsyncClient() as client:
+              response = await client.get(app.http_url + "/health")
+          assert response.status_code == 200
+          body = response.json()
+          assert body["ok"] is True and body["robot_link"] is True
+          assert_web_units_only([response.text], WIRE_VEL)
+
+
+  async def test_bad_or_missing_origin_is_refused_before_accept(robot):
+      async with running_app(robot.url) as app:
+          for origin in ("http://evil.example", None):
+              with pytest.raises(InvalidStatus) as info:
+                  async with connect(app.ws_url, origin=origin):
+                      pass
+              assert info.value.response.status_code == 403
+          assert len(app.runtime.hub) == 0
+          assert app.runtime.session.driver is None
+
+
+  async def test_web_command_reaches_robot_in_wire_units(robot):
+      async with running_app(robot.url) as app:
+          async with operator(app) as ws:
+              await arm_as_driver(ws, app)
+              await send(ws, t="cmd_vel", seq=7, vx=0.189, vy=-0.378, wz=0.0945, src="kbd")
+              await wait_until(lambda: nonzero(robot))
+              command = nonzero(robot)[0]
+              assert set(command) == {"t", "seq", "vx", "vy", "wz"}  # src stripped
+              assert command["seq"] == 7
+              assert command["vx"] == pytest.approx(0.1)
+              assert command["vy"] == pytest.approx(-0.2)
+              assert command["wz"] == pytest.approx(0.05)
+              state = await state_where(ws, lambda s: s["cmd"]["vx"] != 0.0)
+              assert state["cmd"] == {"vx": 0.189, "vy": -0.378, "wz": 0.0945}  # web units
+
+
+  async def test_state_is_in_web_units_and_passes_last_cmd_seq(robot):
+      async with running_app(robot.url) as app:
+          async with operator(app, drive=False) as ws:
+              await wait_until(lambda: app.runtime.link.connected)
+              await robot.send_state(robot_state(t_ns=1, vel=(0.1, 0.05, 0.2), seq=42))
+              state = await state_where(ws, lambda s: s["vel"] is not None)
+              assert state["vel"]["vx"] == pytest.approx(0.189)
+              assert state["vel"]["vy"] == pytest.approx(0.0945)
+              assert state["vel"]["wz"] == pytest.approx(0.378)
+              assert state["imu"]["az"] == 9.81  # IMU is not scaled
+              assert state["last_cmd_seq"] == 42
+              assert state["link"]["robot"] is True
+              assert state["session"]["role"] == "viewer"
+              assert state["pose"] == {"x": 0.0, "y": 0.0, "theta": 0.0}
+
+
+  async def test_state_rate_is_at_most_20_hz(robot):
+      async with running_app(robot.url) as app:
+          async with operator(app, drive=False) as ws:
+              await wait_until(lambda: app.runtime.link.connected)
+              stop = False
+
+              async def flood():
+                  t_ns = 0
+                  while not stop:
+                      await robot.send_state(robot_state(t_ns=t_ns))
+                      t_ns += 5_000_000
+                      await asyncio.sleep(0.005)
+
+              flooder = asyncio.ensure_future(flood())
+              count = 0
+              started = time.monotonic()
+              try:
+                  while time.monotonic() - started < 0.8:
+                      await asyncio.wait_for(ws.recv(), 2.0)
+                      count += 1
+              finally:
+                  stop = True
+                  await asyncio.gather(flooder, return_exceptions=True)
+              elapsed = time.monotonic() - started
+              assert 5 <= count <= 20 * elapsed + 2
+
+
+  async def test_no_wire_values_or_factor_in_any_web_payload(robot):
+      async with running_app(robot.url) as app:
+          async with operator(app) as ws:
+              await arm_as_driver(ws, app)
+              await send(ws, t="cmd_vel", seq=1, vx=0.3402, vy=0.0, wz=0.0)  # wire 0.18
+              await wait_until(lambda: nonzero(robot))
+              for n in range(4):
+                  await robot.send_state(robot_state(t_ns=n * STEP_NS, seq=1))
+              texts = []
+              deadline = time.monotonic() + 0.6
+              while time.monotonic() < deadline:
+                  try:
+                      texts.append(await asyncio.wait_for(ws.recv(), 0.2))
+                  except asyncio.TimeoutError:
+                      break
+              assert len(texts) >= 5
+              assert any(json.loads(t)["vel"] is not None for t in texts)
+              assert_web_units_only(texts, WIRE_VEL + (0.18,))
+
+
+  async def test_watchdog_sends_zero_after_250ms_without_commands(robot):
+      clock = FakeClock()
+      async with running_app(robot.url, clock) as app:
+          async with operator(app) as ws:
+              await arm_as_driver(ws, app)
+              await send(ws, t="cmd_vel", seq=1, vx=0.189, vy=0.0, wz=0.0)
+              await wait_until(lambda: nonzero(robot))
+              before = len(zeros(robot))
+              clock.t += 0.24
+              await asyncio.sleep(0.15)  # several watchdog ticks
+              assert len(zeros(robot)) == before  # not yet
+              clock.t += 0.02
+              await wait_until(lambda: len(zeros(robot)) == before + 1)
+              await asyncio.sleep(0.15)
+              assert len(zeros(robot)) == before + 1  # once, not repeatedly
+              state = await state_where(ws, lambda s: s["cmd"]["vx"] == 0.0)
+              assert state["session"]["armed"] is True  # the watchdog stops, it does not disarm
+
+
+  async def test_operator_disconnect_sends_zero_and_disarms(robot):
+      async with running_app(robot.url) as app:
+          async with operator(app) as ws:
+              await arm_as_driver(ws, app)
+              await send(ws, t="cmd_vel", seq=1, vx=0.189, vy=0.0, wz=0.0)
+              await wait_until(lambda: nonzero(robot))
+              before = len(zeros(robot))
+          await wait_until(lambda: len(zeros(robot)) > before)
+          assert app.runtime.session.armed is False
+          assert app.runtime.session.driver is None
+          async with operator(app, drive=False) as viewer:
+              state = await state_where(viewer, lambda s: True)
+              assert state["session"]["armed"] is False
+              assert state["session"]["has_driver"] is False
+
+
+  async def test_disarm_sends_zero(robot):
+      async with running_app(robot.url) as app:
+          async with operator(app) as ws:
+              await arm_as_driver(ws, app)
+              before = len(zeros(robot))
+              await send(ws, t="arm", on=False)
+              await wait_until(lambda: len(zeros(robot)) > before)
+              await state_where(ws, lambda s: not s["session"]["armed"])
+
+
+  async def test_arm_is_refused_while_the_robot_link_is_down():
+      fake = FakeRobot()
+      await fake.start()
+      url = fake.url
+      await fake.stop()
+      async with running_app(url) as app:
+          async with operator(app) as ws:
+              await state_where(ws, lambda s: s["session"]["role"] == "driver")
+              await send(ws, t="arm", on=True)
+              states = await drain_states(ws, 0.2)
+              assert len(states) >= 2
+              assert all(s["session"]["armed"] is False for s in states)
+              assert all(s["link"]["robot"] is False for s in states)
+
+
+  async def test_link_loss_disarms_and_old_commands_do_not_resume(robot):
+      async with running_app(robot.url) as app:
+          async with operator(app) as ws:
+              await arm_as_driver(ws, app)
+              await send(ws, t="cmd_vel", seq=1, vx=0.189, vy=0.0, wz=0.0)
+              await wait_until(lambda: nonzero(robot))
+              robot.refuse = True  # keep the link down long enough to observe it
+              await robot.drop()
+              lost = await state_where(ws, lambda s: not s["link"]["robot"])
+              assert lost["session"]["armed"] is False
+              assert lost["vel"] is None and lost["imu"] is None
+              robot.refuse = False
+              back = await state_where(ws, lambda s: s["link"]["robot"])
+              assert back["session"]["armed"] is False  # reconnected, still disarmed
+              await wait_until(lambda: len(robot.first_messages) == 2)
+              assert is_zero(robot.first_messages[1])  # the new link starts with zero
+              await send(ws, t="cmd_vel", seq=2, vx=0.189, vy=0.0, wz=0.0)
+              await asyncio.sleep(0.15)
+              assert [c["seq"] for c in nonzero(robot)] == [1]  # seq 2 was not forwarded
+              await send(ws, t="arm", on=True)  # explicit re-arm restores control
+              await state_where(ws, lambda s: s["session"]["armed"])
+              await send(ws, t="cmd_vel", seq=3, vx=0.189, vy=0.0, wz=0.0)
+              await wait_until(lambda: [c["seq"] for c in nonzero(robot)] == [1, 3])
+
+
+  async def test_viewer_may_watch_but_not_command(robot):
+      async with running_app(robot.url) as app:
+          async with operator(app) as driver, operator(app, drive=False) as viewer:
+              await arm_as_driver(driver, app)
+              await robot.send_state(robot_state(t_ns=0, vel=(0.5, 0.0, 0.0)))
+              await robot.send_state(robot_state(t_ns=STEP_NS, vel=(0.5, 0.0, 0.0)))
+              await robot.send_state(robot_state(t_ns=2 * STEP_NS, vel=(0.5, 0.0, 0.0)))
+              moved = await state_where(viewer, lambda s: s["pose"]["x"] > 0.18)
+              assert moved["pose"]["x"] == pytest.approx(0.189)
+              assert moved["session"]["role"] == "viewer"
+              await send(viewer, t="hello", token="wrong")
+              await send(viewer, t="arm", on=False)
+              await send(viewer, t="cmd_vel", seq=9, vx=0.189, vy=0.0, wz=0.0, src="kbd")
+              await send(viewer, t="odom_reset")
+              states = await drain_states(viewer, 0.2)
+              assert len(states) >= 2
+              assert all(s["session"]["armed"] for s in states)  # the viewer's arm(false) ignored
+              assert all(s["pose"]["x"] == pytest.approx(0.189) for s in states)  # so was reset
+              assert nonzero(robot) == []
+              await send(driver, t="odom_reset")  # the driver may reset
+              await state_where(viewer, lambda s: s["pose"]["x"] == 0.0)
+
+
+  async def test_second_operator_with_the_right_token_cannot_take_over(robot):
+      async with running_app(robot.url) as app:
+          async with operator(app) as first, operator(app) as second:
+              await state_where(first, lambda s: s["session"]["role"] == "driver")
+              await send(second, t="hello", token=OPERATOR_TOKEN)
+              states = await drain_states(second, 0.2)
+              assert len(states) >= 2
+              assert all(s["session"]["role"] == "viewer" for s in states)
+              assert app.runtime.session.driver is not None
+
+
+  async def test_malformed_messages_do_not_break_the_handler(robot):
+      async with running_app(robot.url) as app:
+          async with operator(app) as ws:
+              await arm_as_driver(ws, app)
+              junk = [
+                  "not json",
+                  "[1, 2, 3]",
+                  "123",
+                  "null",
+                  '"hello"',
+                  "{}",
+                  '{"t": 5}',
+                  '{"t": ["cmd_vel"]}',
+                  '{"t": "cmd_vel"}',
+                  '{"t": "cmd_vel", "seq": 1, "vx": "fast", "vy": 0, "wz": 0}',
+                  '{"t": "cmd_vel", "seq": -1, "vx": 0, "vy": 0, "wz": 0}',
+                  '{"t": "cmd_vel", "seq": 1, "vx": NaN, "vy": 0, "wz": 0}',
+                  '{"t": "arm", "on": "yes"}',
+                  '{"t": "hello", "token": 5}',
+                  "x" * 5000,
+                  "[" * 100000,
+              ]
+              for text in junk:
+                  await ws.send(text)
+              await ws.send(b"\x00\x01binary")
+              await send(ws, t="cmd_vel", seq=11, vx=0.189, vy=0.0, wz=0.0)  # still works
+              await wait_until(lambda: [c["seq"] for c in nonzero(robot)] == [11])
+              state = await state_where(ws, lambda s: True)
+              assert state["session"]["role"] == "driver" and state["session"]["armed"] is True
+
+
+  async def test_end_to_end_with_the_real_robot_server_and_simulator(robot):
+      from robot_agent.drive import CmdVelWriter
+      from robot_agent.server import RobotServer
+      from robot_agent.sim import SimulatedStm32
+
+      stm = SimulatedStm32()
+      stm.start()
+      writer = CmdVelWriter(stm, motion_enabled=True)
+      healthy = {"ok": True, "state": "ok", "error": None, "restarts": 0}
+      real = RobotServer(
+          token=LINK_TOKEN, writer=writer, stm=stm, devices=lambda: {"stm": healthy, "lidar": healthy}
+      )
+      port = await real.start("127.0.0.1", 0)
+      try:
+          # A frozen clock keeps the app watchdog quiet, so the command stays in the mailbox.
+          async with running_app("ws://127.0.0.1:%d/ws" % port, FakeClock()) as app:
+              async with operator(app) as ws:
+                  await arm_as_driver(ws, app)
+                  await send(ws, t="cmd_vel", seq=5, vx=0.189, vy=0.0, wz=0.0, src="kbd")
+                  await wait_until(lambda: real.build_state()["last_cmd_seq"] == 5)
+                  assert writer.tick() == (pytest.approx(0.1), 0.0, 0.0)  # wire units at the robot
+                  assert stm.last_command[1] == pytest.approx(0.1)
+                  state = await state_where(ws, lambda s: s["vel"] and s["vel"]["vx"] > 0.185)
+                  assert state["vel"]["vx"] == pytest.approx(0.189, abs=0.005)  # web units again
+                  assert state["last_cmd_seq"] == 5
+      finally:
+          await real.close()
+          stm.stop()
+
+
+  # ---- entry point ----
+
+
+  def test_main_binds_to_the_configured_host_and_port(monkeypatch):
+      captured = {}
+      monkeypatch.setattr(app_main.uvicorn, "run", lambda app, **kwargs: captured.update(kwargs))
+      env = {
+          "ROBOT_LINK_TOKEN": "l",
+          "OPERATOR_TOKEN": "o",
+          "APP_BIND_HOST": "127.0.0.9",
+          "APP_BIND_PORT": "8123",
+      }
+      app_main.main(env)
+      assert captured["host"] == "127.0.0.9"
+      assert captured["port"] == 8123
+
+
+  def test_main_refuses_to_start_without_tokens():
+      with pytest.raises(ConfigError):
+          app_main.main({"ROBOT_LINK_TOKEN": "", "OPERATOR_TOKEN": "o"})
+  ```
+
+  **Kiểm tra (chạy từ gốc worktree, theo thứ tự):**
+
+  1. `/home/vth/ws/mecanum_base/.venv/bin/pytest app/server` phải báo `116 passed`. Chạy thêm 2 lần nữa, cả 2 lần phải `116 passed` (test dùng socket thật nên cần đảm bảo không chập chờn).
+  2. `/home/vth/ws/mecanum_base/.venv/bin/pytest` phải báo `188 passed`.
+  3. `grep -rn "1\.89" app/server/app_server` chỉ được khớp trong `control.py`.
+  4. `grep -rn "CMD_VEL_DIVISOR" app/server/app_server` chỉ được khớp trong `control.py` và `telemetry.py`.
+  5. `grep -rn "Co-Authored\|print(" app/server/app_server` không khớp dòng nào.
+  6. Nếu có test FAIL hoặc số `passed` khác: không sửa test cho khớp; trả `BLOCKED` kèm tên test và lỗi.
+
+  **Ghi chú cho người đối chứng (không phải việc của Haiku):**
+
+  - spec/plan/task không nêu tên khóa thẻ của tin web (`t` hay `type`). Work order chọn `t` (đồng nhất PROTO-2), nhận `type` làm bí danh; T08 phải gửi `t`. Cần Opus xác nhận.
+  - FR-09 ("nguồn lệnh hiện tại") cần `src`, nhưng `ControlSession` không lưu `src` và T06 không được sửa `control.py`; state chưa có trường nguồn lệnh. Việc này để T08/T09 tự quyết hoặc mở lại `control.py`.
+  - `state.session` có thêm `role` (riêng từng client) và `state.link` có thêm `rtt_ms` (RTT ping của link robot, cho FR-11); PROTO-1 chỉ liệt kê tên trường cấp trên cùng nên không mâu thuẫn.
+  - Cổng `/health` trả `ok`, `robot_link`, `clients`; không có hệ số hay vận tốc.
+  - Giao thức tin nhị phân `scan` (T13) chưa xử lý: `robot_link.py` bỏ qua khung nhị phân.
+  - Nhánh có `.claude/spec/spec.md` đang sửa chưa commit (git status ` M`) khi viết work order này; không liên quan T06.
 
 ## P3 — Nền client
 
