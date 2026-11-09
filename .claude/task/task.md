@@ -7733,7 +7733,7 @@ Trạng thái: `TODO → ORDERED → CODED → PASS → MERGED` hoặc `BLOCKED`
 ## P4 — Các trang
 
 ### T09 — Trang tổng quan và hệ thống
-- Trạng thái: CODED · Plan: P4 · Phụ thuộc: T08
+- Trạng thái: MERGED · Plan: P4 · Phụ thuộc: T08
 - Spec: FR-08, FR-09, FR-11, FR-12
 - File: `app/client/src/app/page.tsx`, `app/client/src/app/system/page.tsx`, `app/client/src/components/robot/{panels,charts}.tsx`, `app/client/src/components/robot/app-shell.tsx` (cờ mất dữ liệu, SOURCE_LABEL chuyển sang panels), `app/client/src/robot/store.ts` (quỹ đạo, độ trễ, stale), `app/client/src/robot/{telemetry,telemetry.test}.ts`
 - Đạt khi: hiển thị đủ số liệu FR-08, RTT, độ trễ vòng lệnh, quỹ đạo, reset odometry hoạt động.
@@ -7772,6 +7772,7 @@ Trạng thái: `TODO → ORDERED → CODED → PASS → MERGED` hoặc `BLOCKED`
 ### T14 — Kiểm thử toàn tuyến trên mô phỏng
 - Trạng thái: TODO · Plan: P5 · Phụ thuộc: T10, T11, T12, T13
 - Spec: SAF-01, SAF-02, SAF-03, SAF-04, SAF-05, SAF-07, NFR-02, NFR-04, NFR-06
+- Gia cố từ review T09: `LatencyTracker.ack` khớp đúng `seq === last_cmd_seq` thay vì mọi `seq <=` để tránh mẫu sai sau khi tải lại trang hoặc có hai tab lái; hiển thị nguồn lệnh cho người xem nếu quyết định đưa `src` vào state.
 - Gia cố từ các review trước: bọc thân vòng lặp `broadcast_loop` và `watchdog_loop` trong try/except có log để lỗi một vòng không làm chết vòng lặp; chỉ chuyển tiếp `health`, `charge` sau khi kiểm tra kiểu và giá trị hữu hạn; test `telemetry.clear_robot()` khi mất link; `_authorized` của robot trả 401 thay vì lỗi 500 với header hỏng.
 - Việc: chạy toàn bộ test, lint, build; `app/client/src` không chứa hệ số; bắt payload WS chứng minh web không nhận đơn vị wire; ngắt từng chặng và đo thời gian tự dừng; kiểm tra trên trình duyệt thật.
 - Đạt khi: tất cả qua, kết quả đo ghi vào mục này.

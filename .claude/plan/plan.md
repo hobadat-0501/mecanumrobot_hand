@@ -55,6 +55,8 @@ mecanum_base/
       │  ├─ control.ts         # logic thuần: phím thành vector, phân xử nguồn lệnh
       │  ├─ control.test.ts
       │  ├─ store.ts           # WS, state, vòng gửi 20 Hz
+      │  ├─ telemetry.ts       # logic thuần: độ trễ, bộ đệm quỹ đạo, phát hiện mất dữ liệu
+      │  ├─ telemetry.test.ts
       │  ├─ keyboard.tsx       # bàn phím toàn cục (gắn ở root layout)
       │  ├─ mecanum.ts         # công thức PHY-1..PHY-5
       │  ├─ motion.ts          # chạy động học thuận và bộ bám đích PHY-6
