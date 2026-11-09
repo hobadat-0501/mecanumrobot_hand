@@ -208,11 +208,259 @@ export function TrajectoryChart({ className }: { className?: string }) {
 
 
 // ================================================================================================
-// KHU 2: LỰC VÀ MÔ-MEN (T12, FR-07). RỖNG. Nhánh T12 chỉ thêm mã vào khu này.
+// KHU 2: LỰC VÀ MÔ-MEN (T12, FR-07). Nhánh T12 chỉ thêm mã vào khu này.
 // ================================================================================================
 //
-// (chỗ dành cho biểu đồ lực/mô-men của T12)
-//
+// Hai biểu đồ canvas đọc dynamicsFeed (ngoài React): cột mô-men từng bánh so với định mức, và
+// chuỗi thời gian Fx, Fy, Mz. Vẽ lại theo khung hình khi có state mới hoặc đổi kích thước.
+
+import { dynamicsFeed } from "@/robot/dynamics";
+import { TAU_RATED } from "@/robot/mecanum";
+
+interface DynColors {
+  grid: string;
+  text: string;
+  ok: string;
+  bad: string;
+  fx: string;
+  fy: string;
+  mz: string;
+}
+
+function readDynColors(el: HTMLElement): DynColors {
+  const style = getComputedStyle(el);
+  const v = (name: string, fallback: string) => style.getPropertyValue(name).trim() || fallback;
+  const dark = document.documentElement.classList.contains("dark");
+  return {
+    grid: v("--border", "#e4e4e7"),
+    text: v("--muted-foreground", "#71717a"),
+    ok: dark ? "#34d399" : "#059669",
+    bad: v("--destructive", "#dc2626"),
+    fx: dark ? "#60a5fa" : "#2563eb",
+    fy: dark ? "#fbbf24" : "#d97706",
+    mz: dark ? "#c084fc" : "#9333ea",
+  };
+}
+
+/** Chuẩn bị canvas theo devicePixelRatio; trả ngữ cảnh và kích thước CSS, hoặc null nếu chưa có kích thước. */
+function prepareCanvas(canvas: HTMLCanvasElement): { ctx: CanvasRenderingContext2D; w: number; h: number } | null {
+  const ctx = canvas.getContext("2d");
+  if (ctx === null) return null;
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth;
+  const h = canvas.clientHeight;
+  if (w === 0 || h === 0) return null;
+  const pw = Math.round(w * dpr);
+  const ph = Math.round(h * dpr);
+  if (canvas.width !== pw || canvas.height !== ph) {
+    canvas.width = pw;
+    canvas.height = ph;
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  return { ctx, w, h };
+}
+
+/** Gắn một hàm vẽ vào canvas: vẽ theo khung hình khi có state mới hoặc đổi kích thước. */
+function useCanvasPainter(draw: (canvas: HTMLCanvasElement, colors: DynColors) => void) {
+  const ref = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const canvas = ref.current;
+    if (canvas === null) return;
+    let frame = 0;
+    const paint = () => {
+      frame = 0;
+      draw(canvas, readDynColors(canvas));
+    };
+    const schedule = () => {
+      if (frame === 0) frame = requestAnimationFrame(paint);
+    };
+    const unsubscribe = subscribeTelemetry(schedule);
+    const observer = new ResizeObserver(schedule);
+    observer.observe(canvas);
+    schedule();
+    return () => {
+      unsubscribe();
+      observer.disconnect();
+      if (frame !== 0) cancelAnimationFrame(frame);
+    };
+  }, [draw]);
+  return ref;
+}
+
+const WHEEL_NAMES = ["A", "B", "C", "D"];
+
+function drawWheelTorque(canvas: HTMLCanvasElement, c: DynColors): void {
+  const p = prepareCanvas(canvas);
+  if (p === null) return;
+  const { ctx, w, h } = p;
+  const r = dynamicsFeed.result;
+  const padL = 8;
+  const padR = 8;
+  const padT = 18;
+  const padB = 22;
+  const plotH = h - padT - padB;
+  // Trục dọc đối xứng quanh 0: tối thiểu 1.25 lần định mức, mở rộng nếu vượt.
+  let peak = TAU_RATED * 1.25;
+  if (r !== null) for (const t of r.tau) peak = Math.max(peak, Math.abs(t) * 1.1);
+  const zeroY = padT + plotH / 2;
+  const toY = (t: number) => zeroY - (t / peak) * (plotH / 2);
+
+  ctx.font = "10px ui-monospace, monospace";
+  ctx.lineWidth = 1;
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = c.text;
+  ctx.strokeStyle = c.grid;
+  ctx.beginPath();
+  ctx.moveTo(padL, Math.round(zeroY) + 0.5);
+  ctx.lineTo(w - padR, Math.round(zeroY) + 0.5);
+  ctx.stroke();
+
+  // Đường định mức ±τ_rated, nét đứt.
+  ctx.strokeStyle = c.bad;
+  ctx.setLineDash([5, 4]);
+  for (const sign of [1, -1]) {
+    const y = Math.round(toY(sign * TAU_RATED)) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(padL, y);
+    ctx.lineTo(w - padR, y);
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  ctx.fillStyle = c.bad;
+  ctx.textAlign = "right";
+  ctx.fillText(`định mức ±${TAU_RATED} N·m`, w - padR, Math.max(8, toY(TAU_RATED) - 8));
+
+  const slot = (w - padL - padR) / 4;
+  const barW = Math.min(48, slot * 0.5);
+  for (let i = 0; i < 4; i++) {
+    const cx = padL + slot * (i + 0.5);
+    ctx.fillStyle = c.text;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "alphabetic";
+    ctx.fillText(`Bánh ${WHEEL_NAMES[i]}`, cx, h - 6);
+    if (r === null) continue;
+    const t = r.tau[i];
+    const over = r.over[i];
+    ctx.fillStyle = over ? c.bad : c.ok;
+    const y = toY(t);
+    ctx.fillRect(cx - barW / 2, Math.min(y, zeroY), barW, Math.max(1, Math.abs(y - zeroY)));
+    ctx.fillStyle = over ? c.bad : c.text;
+    ctx.textBaseline = "middle";
+    const labelY = t >= 0 ? y - 8 : y + 8;
+    ctx.fillText(t.toFixed(3), cx, Math.min(h - padB - 4, Math.max(8, labelY)));
+  }
+  if (r === null) {
+    ctx.fillStyle = c.text;
+    ctx.font = "13px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("Chưa có dữ liệu", w / 2, h / 2 - 14);
+  }
+}
+
+/** Mô-men τ_i từng bánh (cột) so với đường định mức; cột chuyển đỏ khi vượt. */
+export function WheelTorqueChart({ className }: { className?: string }) {
+  const ref = useCanvasPainter(drawWheelTorque);
+  return (
+    <canvas
+      ref={ref}
+      role="img"
+      aria-label="Mô-men từng bánh so với mô-men định mức, đơn vị N·m"
+      className={cn("block h-full w-full", className)}
+    />
+  );
+}
+
+const SERIES: { key: "fx" | "fy" | "mz"; label: string }[] = [
+  { key: "fx", label: "Fx (N)" },
+  { key: "fy", label: "Fy (N)" },
+  { key: "mz", label: "Mz (N·m)" },
+];
+
+function drawForceHistory(canvas: HTMLCanvasElement, c: DynColors): void {
+  const p = prepareCanvas(canvas);
+  if (p === null) return;
+  const { ctx, w, h } = p;
+  const hist = dynamicsFeed.history;
+  const n = hist.length;
+  const padL = 40;
+  const padR = 8;
+  const padT = 22;
+  const padB = 8;
+  const plotW = w - padL - padR;
+  const plotH = h - padT - padB;
+
+  let peak = 1;
+  for (let k = 0; k < 3; k++) for (let i = 0; i < n; i++) peak = Math.max(peak, Math.abs(hist.at(k, i)));
+  peak = Math.ceil(peak * 1.1);
+  const zeroY = padT + plotH / 2;
+  const toY = (v: number) => zeroY - (v / peak) * (plotH / 2);
+
+  ctx.font = "10px ui-monospace, monospace";
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = c.grid;
+  ctx.fillStyle = c.text;
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+  for (const v of [peak, 0, -peak]) {
+    const y = Math.round(toY(v)) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(padL, y);
+    ctx.lineTo(w - padR, y);
+    ctx.stroke();
+    ctx.fillText(`${v}`, padL - 4, y);
+  }
+
+  // Chú giải.
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+  let lx = padL;
+  for (const s of SERIES) {
+    ctx.fillStyle = c[s.key];
+    ctx.fillRect(lx, 6, 10, 3);
+    ctx.fillStyle = c.text;
+    ctx.fillText(s.label, lx + 14, 12);
+    lx += 14 + ctx.measureText(s.label).width + 14;
+  }
+
+  if (n < 2) {
+    ctx.fillStyle = c.text;
+    ctx.font = "13px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("Chưa có dữ liệu", w / 2, h / 2);
+    return;
+  }
+  const dx = plotW / (hist.capacity - 1);
+  const x0 = padL + plotW - (n - 1) * dx; // mẫu mới nhất ở mép phải
+  ctx.lineWidth = 1.75;
+  ctx.lineJoin = "round";
+  SERIES.forEach((s, k) => {
+    ctx.strokeStyle = c[s.key];
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const x = x0 + i * dx;
+      const y = toY(hist.at(k, i));
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  });
+}
+
+/** Chuỗi thời gian Fx, Fy, Mz gần đây (khoảng 20 s ở 20 Hz). */
+export function ForceHistoryChart({ className }: { className?: string }) {
+  const ref = useCanvasPainter(drawForceHistory);
+  return (
+    <canvas
+      ref={ref}
+      role="img"
+      aria-label="Lịch sử Fx, Fy, Mz theo thời gian"
+      className={cn("block h-full w-full", className)}
+    />
+  );
+}
 //
 //
 //
