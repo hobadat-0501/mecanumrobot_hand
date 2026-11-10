@@ -30,6 +30,7 @@ vision = [
     "websockets>=14,<17",
     "python-dotenv>=1,<2",
     "numpy>=2.0,<3",
+    "cryptography>=42",
 ]
 test = [
     "pytest>=8,<10",

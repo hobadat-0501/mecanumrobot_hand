@@ -20,7 +20,27 @@ export type ClientMessage =
     }
   | { t: "arm"; on: boolean }
   | { t: "mode"; gesture: boolean }
+  | StaffCommand
   | { t: "odom_reset" };
+
+/** Lệnh quản lý nhân viên (PROTO-1/3): chỉ driver gửi được, app server chuyển tiếp tới vision agent. */
+export type StaffCommand =
+  | { t: "staff_list" }
+  | { t: "staff_create"; code: string; name: string; note: string; allowed: boolean }
+  | { t: "staff_update"; id: number; code?: string; name?: string; note?: string; allowed?: boolean }
+  | { t: "staff_delete"; id: number }
+  | { t: "faces_clear"; id: number };
+
+/** Một nhân viên như web nhận được: không có embedding, chỉ số mẫu. */
+export interface StaffMember {
+  id: number;
+  code: string;
+  name: string;
+  note: string;
+  allowed: boolean;
+  samples: number;
+  last_enrolled: number | null;
+}
 
 /** Chế độ điều khiển của phiên: tay hoặc cử chỉ (D-09). Không mang vận tốc. */
 export type SessionMode = "manual" | "gesture";

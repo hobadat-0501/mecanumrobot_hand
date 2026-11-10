@@ -25,7 +25,7 @@ import {
   parseServerMessage,
   resolveWsUrl,
 } from "./protocol";
-import type { ClientMessage, Role, ScanFrame, SessionMode, StateMsg } from "./protocol";
+import type { ClientMessage, Role, ScanFrame, SessionMode, StaffCommand, StateMsg } from "./protocol";
 import {
   HistoryBuffer,
   LatencyTracker,
@@ -348,6 +348,12 @@ export function emergencyStop(): void {
 export function setGestureMode(on: boolean): void {
   if (on && !canDrive()) return;
   send({ t: "mode", gesture: on });
+}
+
+/** Gửi lệnh quản lý nhân viên; app server chỉ chuyển tiếp khi client là driver. */
+export function sendStaff(cmd: StaffCommand): void {
+  if (shell.role !== "driver") return;
+  send(cmd);
 }
 
 /** Địa chỉ luồng video MJPEG; null khi chưa có cookie xem video. */

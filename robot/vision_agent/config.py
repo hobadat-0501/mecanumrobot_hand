@@ -26,6 +26,8 @@ class Config:
     link_token: str
     robot_socket: str = "/run/mecanum/vision.sock"
     own_socket: str = "/run/mecanum/vision-agent.sock"
+    db_path: str = "data/vision/staff.sqlite3"
+    face_key: str = ""  # Fernet key; empty = key file next to the database
 
 
 def _flag(env: Mapping[str, str], name: str) -> bool:
@@ -63,4 +65,6 @@ def load_config(
         robot_socket=environ.get("VISION_SOCKET", "").strip() or "/run/mecanum/vision.sock",
         own_socket=environ.get("VISION_OWN_SOCKET", "").strip()
         or "/run/mecanum/vision-agent.sock",
+        db_path=environ.get("VISION_DB", "").strip() or "data/vision/staff.sqlite3",
+        face_key=environ.get("FACE_DATA_KEY", "").strip(),
     )

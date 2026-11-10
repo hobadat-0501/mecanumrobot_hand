@@ -15,8 +15,12 @@ import sys
 import time
 
 from .config import Config, ConfigError, load_config
+from pathlib import Path
+
+from .enroll import StaffCommands
 from .pipeline import Pipeline
 from .server import VisionServer
+from .store import Store, load_key
 
 log = logging.getLogger("vision_agent")
 TICK_S = 0.05
@@ -99,13 +103,27 @@ async def run(config: Config) -> None:
     link = RobotLink(config.robot_socket, config.own_socket)
     if not link.open():
         log.warning("robot link unavailable: no status will arrive, the FSM stays in ESTOP/OFF")
-    server = VisionServer(token=config.link_token, get_state=lambda: pipeline.vision_state(link.mode))
+    db = Path(config.db_path)
+    store = Store(db, load_key(config.face_key, db.with_suffix(".key")))
+    staff = StaffCommands(
+        store,
+        mode_on=lambda: link.mode,
+        active_user=lambda: pipeline.fsm.user,
+        on_revoke=pipeline.revoke,
+        on_enroll=lambda start: pipeline.enroll(start, time.monotonic_ns()),
+    )
+    server = VisionServer(
+        token=config.link_token,
+        get_state=lambda: pipeline.vision_state(link.mode),
+        on_command=staff.handle,
+    )
     await server.start(config.bind_host, config.bind_port)
 
     async def tick() -> None:
         seq, was_on = 0, False
         while True:
             now = time.monotonic_ns()
+            staff.tick()
             link.poll(now)
             if link.mode != was_on:
                 pipeline.mode_changed(link.mode, now)
@@ -126,6 +144,7 @@ async def run(config: Config) -> None:
         link.send_cmd(time.monotonic_ns(), "OFF", None, (0.0, 0.0, 0.0))
         await server.close()
         link.close()
+        store.close()
 
 
 def main() -> int:

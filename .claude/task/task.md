@@ -9133,7 +9133,7 @@ Mỗi task còn lại theo quy trình plan.md §5. Work order do Sonnet điền 
 - Work order: _(Sonnet điền)_
 
 ### T22 — Nhân viên: store, trang /gesture/staff, đăng ký (khung)
-- Trạng thái: TODO · Plan: V2 · Phụ thuộc: T20, T21
+- Trạng thái: CODED (chưa đối chứng Sonnet; pytest robot gồm test_staff.py qua; client tsc/eslint/vitest/build qua; đăng ký mặt thật chờ T25, chưa thử CRUD với Jetson thật) · Plan: V2 · Phụ thuộc: T20, T21
 - Spec: FR-01, FR-14, FR-15, SAF-12, NFR-09, PROTO-3
 - Việc: `store.py` (SQLite `employees`, `face_samples` mã hóa, `events`), `enroll.py` (phiên, chưa có model thật), lệnh PROTO-3, `app/gesture/staff/page.tsx` (thêm/sửa/xóa, bật/tắt quyền, xác nhận xóa).
 - Đạt khi: CRUD chạy trên web; tắt quyền người đang điều khiển → LOCKED; web không nhận embedding.

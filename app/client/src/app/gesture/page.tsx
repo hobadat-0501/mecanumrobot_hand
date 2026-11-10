@@ -4,6 +4,7 @@
 // lệnh chuyển động của chế độ này đi thẳng trên Jetson, không qua trang này. Space dừng khẩn và tắt chế độ.
 
 import { Hand } from "lucide-react";
+import Link from "next/link";
 
 import { Panel, Readout, ReadoutGrid, StatusBadge, dataStateOf, DataLostAlert, usePolled } from "@/components/robot/panels";
 import { Button } from "@/components/ui/button";
@@ -39,6 +40,9 @@ export default function GesturePage() {
         <p className="mt-1 text-sm text-muted-foreground">
           Điều khiển bằng cử chỉ qua camera. Cần arm và quyền lái; lái tay luôn thắng.
         </p>
+        <Link href="/gesture/staff" className="mt-1 inline-block text-sm underline">
+          Quản lý nhân viên
+        </Link>
       </div>
       <DataLostAlert state={dataStateOf(shell)} />
 

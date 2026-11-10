@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import base64
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from .gesture_fsm import NS, GestureFsm, Observation
 
@@ -30,12 +30,27 @@ class Pipeline:
     fsm: GestureFsm = field(default_factory=GestureFsm)
     _t0: int | None = None
     frames: int = 0
+    _revoked: bool = False
 
     def mode_changed(self, on: bool, now_ns: int) -> None:
         self._t0 = now_ns if on else None
         self.fsm.mode_changed(on, now_ns)
 
+    def revoke(self) -> None:
+        """The active driver was disabled or deleted: the next tick locks (SAF-12)."""
+        self._revoked = True
+
+    def enroll(self, start: bool, now_ns: int) -> bool:
+        return self.fsm.enroll(start, now_ns)
+
     def _observation(self, now_ns: int) -> Observation:
+        obs = self._observe(now_ns)
+        if self._revoked:
+            self._revoked = False
+            obs = replace(obs, user_disabled=True)
+        return obs
+
+    def _observe(self, now_ns: int) -> Observation:
         if not self.simulate or self._t0 is None:
             return Observation()
         t = (now_ns - self._t0) / NS

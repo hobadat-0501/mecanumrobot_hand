@@ -39,3 +39,8 @@ node_modules/
 
 # Firmware STM32 của bên ngoài, chỉ để tham khảo, không đưa vào repo
 /stm_goc/
+
+# Face data (D-12): databases, keys and training images never go to git
+data/
+*.sqlite3
+*.key
