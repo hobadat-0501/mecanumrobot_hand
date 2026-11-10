@@ -589,10 +589,10 @@ def test_telemetry_vel_and_imu_pass_through_unchanged():
 def test_telemetry_state_has_exactly_the_proto1_fields():
     state = Telemetry().build_state(SNAPSHOT, False)
     assert set(state) == {"t", "link", "session", "vel", "pose", "cmd", "imu", "voltage",
-                          "flag_stop", "charge", "health", "last_cmd_seq"}
+                          "flag_stop", "charge", "health", "last_cmd_seq", "gesture"}
     assert state["t"] == "state"
     assert state["link"] == {"robot": False, "rtt_ms": None}
-    assert state["session"] == {"armed": False, "has_driver": False}
+    assert state["session"] == {"armed": False, "has_driver": False, "mode": "manual"}
     assert state["vel"] is None and state["imu"] is None
     assert state["pose"] == {"x": 0.0, "y": 0.0, "theta": 0.0}
 
@@ -731,9 +731,10 @@ async def robot():
 
 
 @asynccontextmanager
-async def running_app(robot_url, clock=None):
+async def running_app(robot_url, clock=None, extra_env=None):
     settings = load_settings(
         {
+            **(extra_env or {}),
             "ROBOT_LINK_TOKEN": LINK_TOKEN,
             "OPERATOR_TOKEN": OPERATOR_TOKEN,
             "ROBOT_WS_URL": robot_url,

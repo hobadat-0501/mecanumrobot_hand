@@ -13,6 +13,7 @@ import time
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
 WATCHDOG_S = 0.25
+MODE_GRACE_S = 1.0
 
 Vec3 = Tuple[float, float, float]
 
@@ -80,6 +81,12 @@ class ControlSession:
         self._last_cmd_at: Optional[float] = None
         self._cmd_web: Vec3 = (0.0, 0.0, 0.0)
         self._last_seq: Optional[int] = None
+        self._gesture = False  # gesture mode (D-09): only while armed, only the driver sets it
+        self._mode_at = 0.0
+
+    @property
+    def gesture(self) -> bool:
+        return self._gesture
 
     @property
     def armed(self) -> bool:
@@ -130,7 +137,29 @@ class ControlSession:
             self._disarm()
         return True
 
+    def set_mode(self, client_id: str, on: Any) -> bool:
+        """Driver turns gesture mode on/off. On needs `armed` (SAF-09); off is always allowed."""
+        if client_id != self._driver or not isinstance(on, bool):
+            return False
+        if on:
+            if not self._armed:
+                return False
+            self._gesture = True
+            self._mode_at = self._clock()
+        else:
+            self._gesture = False
+        return True
+
+    def robot_mode_off(self) -> bool:
+        """The robot reports manual mode: follow it, after a short grace for the mode message in
+        flight. True when the mode was on and is now off."""
+        if self._gesture and self._clock() - self._mode_at > MODE_GRACE_S:
+            self._gesture = False
+            return True
+        return False
+
     def _disarm(self) -> None:
+        self._gesture = False
         self._armed = False
         self._last_cmd_at = None
         self._cmd_web = (0.0, 0.0, 0.0)
@@ -144,6 +173,8 @@ class ControlSession:
         seq, vx, vy, wz = validate_cmd_vel(msg)
         if not self._armed or client_id != self._driver:
             return None
+        if self._gesture and (vx or vy or wz):
+            self._gesture = False  # manual driving wins; the robot does the same on its side
         self._last_cmd_at = self._clock()
         self._cmd_web = (vx, vy, wz)
         self._last_seq = seq
@@ -166,6 +197,7 @@ class ControlSession:
         return {
             "armed": self._armed,
             "has_driver": self._driver is not None,
+            "mode": "gesture" if self._gesture else "manual",
             "cmd": {"vx": vx, "vy": vy, "wz": wz},
             "last_cmd_seq": self._last_seq,
         }

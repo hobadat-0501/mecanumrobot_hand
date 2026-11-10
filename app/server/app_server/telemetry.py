@@ -141,6 +141,7 @@ class Telemetry:
         self._charge: Any = None
         self._health: Any = None
         self._last_cmd_seq: Optional[int] = None
+        self._gesture: Optional[Dict[str, Any]] = None  # robot-reported mode/src/vision/lidar_gate
 
     def clear_robot(self) -> None:
         """The robot link dropped: forget its telemetry (the pose is kept)."""
@@ -169,6 +170,9 @@ class Telemetry:
         self._flag_stop = flag_stop if valid_flag else None
         self._charge = _clean_dict(msg.get("charge"))
         self._health = _clean_dict(msg.get("health"))
+        # Gesture-mode report (v7). Distances and flags only: nothing here is a velocity, so the
+        # calibration scale is not involved and the app never sees one (SAF-01).
+        self._gesture = _clean_dict({k: msg.get(k) for k in ("mode", "src", "vision", "lidar_gate") if k in msg})
         seq = msg.get("last_cmd_seq")
         valid_seq = isinstance(seq, int) and not isinstance(seq, bool)
         self._last_cmd_seq = seq if valid_seq else None
@@ -184,7 +188,12 @@ class Telemetry:
         return {
             "t": "state",
             "link": {"robot": robot_connected, "rtt_ms": rtt_ms},
-            "session": {"armed": session["armed"], "has_driver": session["has_driver"]},
+            "session": {
+                "armed": session["armed"],
+                "has_driver": session["has_driver"],
+                "mode": session.get("mode", "manual"),
+            },
+            "gesture": dict(self._gesture) if self._gesture else None,
             "vel": dict(self._vel) if self._vel is not None else None,
             "pose": self.odometry.pose(),
             "cmd": dict(session["cmd"]),

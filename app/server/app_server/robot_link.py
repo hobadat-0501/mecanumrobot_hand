@@ -1,8 +1,8 @@
 """WebSocket client from the app server down to the robot (PROTO-2).
 
 Connects to ROBOT_WS_URL with `Authorization: Bearer <token>` and reconnects forever with
-back-off. The only thing sent down is `cmd_vel` with exactly the keys t, seq, vx, vy, wz in
-wire units. Outbound commands are latest-only: one slot, newer replaces older, so no backlog
+back-off. Sent down: `cmd_vel` with exactly the keys t, seq, vx, vy, wz in wire units, and the
+session commands `mode{seq,gesture}` and `hb{seq}` that carry no velocity (D-10). Outbound commands are latest-only: one slot, newer replaces older, so no backlog
 can build up (NFR-03). A command is never stored while the link is down or carried across a
 reconnect (SAF-03). Incoming `state` messages are handed to `on_state`; binary frames are
 forwarded to `on_scan` unchanged after a size/type check (PROTO-2).
@@ -58,6 +58,10 @@ class RobotLink:
         self._connected = False
         self._ws: Any = None
         self._pending: Optional[str] = None
+        self._pending_mode: Optional[str] = None  # session commands (D-10): carry no velocity
+        self._pending_hb: Optional[str] = None
+        self._mode_seq = 0
+        self._hb_seq = 0
         self._wake = asyncio.Event()
         self._last_seq = 0
         self._rtt_s: Optional[float] = None
@@ -90,6 +94,26 @@ class RobotLink:
     def send_zero(self) -> bool:
         """Queue a zero cmd_vel that replaces any unsent command."""
         return self.send_cmd_vel(self._last_seq, 0.0, 0.0, 0.0)
+
+    def send_mode(self, gesture: bool) -> bool:
+        """Queue `mode{seq,gesture}` (latest only). False when the link is down."""
+        if not self._connected:
+            return False
+        self._mode_seq += 1
+        self._pending_mode = json.dumps(
+            {"t": "mode", "seq": self._mode_seq, "gesture": bool(gesture)}, separators=(",", ":")
+        )
+        self._wake.set()
+        return True
+
+    def send_hb(self) -> bool:
+        """Queue `hb{seq}`. False when the link is down."""
+        if not self._connected:
+            return False
+        self._hb_seq += 1
+        self._pending_hb = json.dumps({"t": "hb", "seq": self._hb_seq}, separators=(",", ":"))
+        self._wake.set()
+        return True
 
     def _notify(self, callback: Optional[Callable[[], None]]) -> None:
         if callback is None:
@@ -124,7 +148,8 @@ class RobotLink:
 
     async def _session(self, ws: Any) -> None:
         self._ws = ws
-        self._pending = None
+        self._pending = self._pending_mode = self._pending_hb = None
+        self._mode_seq = self._hb_seq = 0  # the robot resets its seq memory on a new link
         self._wake.clear()
         self._connected = True
         self._rtt_s = None
@@ -139,7 +164,7 @@ class RobotLink:
             self._ws = None
             self._rtt_s = None
             pinger.cancel()
-            self._pending = None
+            self._pending = self._pending_mode = self._pending_hb = None
             self._notify(self._on_disconnect)
             sender.cancel()
             receiver.cancel()
@@ -163,9 +188,12 @@ class RobotLink:
         while True:
             await self._wake.wait()
             self._wake.clear()
+            mode, self._pending_mode = self._pending_mode, None
             text, self._pending = self._pending, None
-            if text is not None:
-                await ws.send(text)
+            hb, self._pending_hb = self._pending_hb, None
+            for message in (mode, text, hb):  # mode first: an off must not wait behind a command
+                if message is not None:
+                    await ws.send(message)
 
     async def _receive_loop(self, ws: Any) -> None:
         async for message in ws:

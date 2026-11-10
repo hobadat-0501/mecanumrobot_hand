@@ -27,6 +27,9 @@ class Settings:
     allowed_origins: Tuple[str, ...]
     # Calibration: real speed / speed reported by the STM (measured with a tape measure).
     speed_scale: float
+    # Vision agent (PROTO-3). An empty token disables the vision link: the web then shows no vision.
+    vision_ws_url: str = "ws://100.69.39.18:8766/ws"
+    vision_link_token: str = ""
 
 
 def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
@@ -69,4 +72,6 @@ def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
         bind_port=bind_port,
         allowed_origins=origins,
         speed_scale=speed_scale,
+        vision_ws_url=env.get("VISION_WS_URL", "ws://100.69.39.18:8766/ws").strip(),
+        vision_link_token=env.get("VISION_LINK_TOKEN", "").strip(),
     )
