@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -19,12 +20,15 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, Mapping, Optional
 
 import uvicorn
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, Request, Response, WebSocket
+from fastapi.responses import StreamingResponse
 
 from .config import Settings, load_settings
-from .control import ControlSession
+from .control import ControlSession, origin_allowed
 from .robot_link import RobotLink
 from .telemetry import Telemetry
+from .vision_link import COMMANDS as VISION_COMMANDS
+from .vision_link import VisionLink
 
 log = logging.getLogger("app_server")
 
@@ -32,6 +36,10 @@ STATE_HZ = 20.0
 SCAN_HZ = 10.0
 SCAN_TICK_S = 0.02
 WATCHDOG_TICK_S = 0.05
+HB_PERIOD_S = 0.2  # 5 Hz mode heartbeat to the robot (SAF-09)
+VIDEO_FPS = 15.0
+MAX_VIDEO_SESSIONS = 16
+VISION_STATE_KEYS = ("mode", "state", "user", "gesture", "guide", "fps", "temps", "events")
 MAX_MESSAGE_CHARS = 4096
 WS_MAX_SIZE_BYTES = 65536
 
@@ -100,11 +108,20 @@ class Hub:
         for client in list(self._clients.values()):
             client.offer_scan(frame)
 
-    def publish(self, state: Dict[str, Any], role_of: Callable[[str], Optional[str]]) -> None:
-        """Offer `state` to every client, adding that client's own role under `session`."""
+    def publish(
+        self,
+        state: Dict[str, Any],
+        role_of: Callable[[str], Optional[str]],
+        extra_of: Optional[Callable[[str], Dict[str, Any]]] = None,
+    ) -> None:
+        """Offer `state` to every client, adding that client's own role (and extras) to `session`."""
         for client in list(self._clients.values()):
             payload = dict(state)
-            payload["session"] = dict(state["session"], role=role_of(client.client_id))
+            payload["session"] = dict(
+                state["session"],
+                role=role_of(client.client_id),
+                **(extra_of(client.client_id) if extra_of is not None else {}),
+            )
             client.offer(json.dumps(payload, separators=(",", ":")))
 
 
@@ -146,8 +163,48 @@ def create_app(
         backoff_max_s=backoff_max_s,
     )
 
+    vision_data: Dict[str, Any] = {"state": None, "result": None}
+
+    def on_vision_state(data: Dict[str, Any]) -> None:
+        # Whitelist: only display fields reach the web. The command is reduced to a flag (PROTO-3
+        # carries no velocity, and none must leave here).
+        clean = {k: data[k] for k in VISION_STATE_KEYS if k in data}
+        clean["cmd_active"] = bool(isinstance(data.get("cmd"), dict) and data["cmd"].get("active"))
+        vision_data["state"] = clean
+
+    def on_vision_result(data: Dict[str, Any]) -> None:
+        vision_data["result"] = {k: v for k, v in data.items() if k not in ("vx", "vy", "wz")}
+
+    vision: Optional[VisionLink] = None
+    if settings.vision_link_token:
+        vision = VisionLink(
+            settings.vision_ws_url,
+            settings.vision_link_token,
+            on_state=on_vision_state,
+            on_result=on_vision_result,
+            on_disconnect=lambda: vision_data.update(state=None, result=None),
+        )
+    video_nonces: Dict[str, str] = {}  # client_id -> one-time nonce granted after a valid hello
+    video_sessions: Dict[str, None] = {}  # cookie values (insertion ordered, bounded)
+
     def build_state() -> Dict[str, Any]:
-        return telemetry.build_state(session.snapshot(), link.connected, link.latency_s)
+        state = telemetry.build_state(session.snapshot(), link.connected, link.latency_s)
+        state["vision"] = {
+            "link": vision is not None and vision.connected,
+            "enabled": vision is not None,
+            "state": vision_data["state"],
+            "result": vision_data["result"],
+        }
+        return state
+
+    def end_gesture() -> None:
+        """Gesture mode off on the robot and zero velocity (the mode is already off here)."""
+        link.send_mode(False)
+        link.send_zero()
+
+    def video_extra(client_id: str) -> Dict[str, Any]:
+        nonce = video_nonces.get(client_id)
+        return {"video_nonce": nonce} if nonce else {}
 
     async def broadcast_loop() -> None:
         loop = asyncio.get_running_loop()
@@ -155,7 +212,7 @@ def create_app(
         due = loop.time()
         while True:
             try:
-                hub.publish(build_state(), session.role)
+                hub.publish(build_state(), session.role, video_extra)
             except Exception:
                 log.exception("broadcast iteration failed")  # one bad iteration must not end the loop
             due += period
@@ -175,6 +232,20 @@ def create_app(
                 last = now
                 hub.publish_scan(frame)
             await asyncio.sleep(SCAN_TICK_S)
+
+    async def heartbeat_loop() -> None:
+        # While gesture mode is on: hb to the robot at 5 Hz, and follow the robot if it turned the
+        # mode off itself (manual wins, heartbeat loss, link replacement).
+        while True:
+            try:
+                if session.gesture:
+                    link.send_hb()
+                    gesture = telemetry.build_state(session.snapshot(), link.connected)["gesture"]
+                    if gesture is not None and gesture.get("mode") == "manual":
+                        session.robot_mode_off()
+            except Exception:
+                log.exception("heartbeat iteration failed")
+            await asyncio.sleep(HB_PERIOD_S)
 
     async def watchdog_loop() -> None:
         while True:
@@ -196,7 +267,8 @@ def create_app(
             return
         kind = msg.get("t", msg.get("type"))
         if kind == "hello":
-            session.hello(client_id, msg.get("token"))
+            if session.hello(client_id, msg.get("token")):
+                video_nonces[client_id] = secrets.token_urlsafe(16)
         elif kind == "cmd_vel":
             try:
                 wire = session.handle_cmd_vel(client_id, msg)
@@ -209,7 +281,19 @@ def create_app(
             if on is True and not link.connected:
                 return  # no arming without a robot link
             if session.arm(client_id, on) and on is False:
-                link.send_zero()
+                end_gesture()
+        elif kind == "mode":
+            gesture = msg.get("gesture")
+            if gesture is True and not link.connected:
+                return  # no gesture mode without a robot link
+            if session.set_mode(client_id, gesture):
+                link.send_mode(gesture)
+                if gesture is False:
+                    link.send_zero()
+        elif isinstance(kind, str) and kind in VISION_COMMANDS:
+            # Staff and enrolment commands: only the driver, and only to the vision agent.
+            if vision is not None and session.role(client_id) == "driver":
+                asyncio.ensure_future(vision.send_command(msg))
         elif kind == "odom_reset":
             if session.role(client_id) == "driver":
                 telemetry.reset_odometry()
@@ -221,7 +305,10 @@ def create_app(
             asyncio.ensure_future(broadcast_loop()),
             asyncio.ensure_future(scan_loop()),
             asyncio.ensure_future(watchdog_loop()),
+            asyncio.ensure_future(heartbeat_loop()),
         ]
+        if vision is not None:
+            tasks.append(asyncio.ensure_future(vision.run()))
         try:
             yield
         finally:
@@ -230,11 +317,76 @@ def create_app(
             await asyncio.gather(*tasks, return_exceptions=True)
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
-    app.state.runtime = SimpleNamespace(session=session, link=link, telemetry=telemetry, hub=hub)
+    app.state.runtime = SimpleNamespace(session=session, link=link, telemetry=telemetry, hub=hub, vision=vision)
 
     @app.get("/health")
     async def health() -> Dict[str, Any]:
         return {"ok": True, "robot_link": link.connected, "clients": len(hub)}
+
+    def _cors(request: Request, response: Response) -> bool:
+        origin = request.headers.get("origin")
+        if not origin_allowed(origin, settings.allowed_origins):
+            return False
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Headers"] = "content-type"
+        response.headers["Vary"] = "Origin"
+        return True
+
+    @app.options("/video/session")
+    async def video_session_preflight(request: Request, response: Response) -> Response:
+        if not _cors(request, response):
+            response.status_code = 403
+        return response
+
+    @app.post("/video/session")
+    async def video_session(request: Request, response: Response) -> Dict[str, Any]:
+        # The nonce was handed to a driver whose hello was valid; it is single use.
+        if not _cors(request, response):
+            response.status_code = 403
+            return {"ok": False}
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        nonce = body.get("nonce") if isinstance(body, dict) else None
+        owner = next((c for c, n in video_nonces.items() if isinstance(nonce, str) and n == nonce), None)
+        if owner is None:
+            response.status_code = 403
+            return {"ok": False}
+        del video_nonces[owner]
+        cookie = secrets.token_urlsafe(24)
+        video_sessions[cookie] = None
+        while len(video_sessions) > MAX_VIDEO_SESSIONS:
+            video_sessions.pop(next(iter(video_sessions)))
+        response.set_cookie("video_session", cookie, httponly=True, samesite="lax", max_age=8 * 3600)
+        return {"ok": True}
+
+    @app.get("/video")
+    async def video(request: Request) -> Response:
+        if vision is None or request.cookies.get("video_session") not in video_sessions:
+            return Response(status_code=403)
+
+        async def frames():
+            last = -1
+            while not await request.is_disconnected():
+                jpeg = vision.frame
+                if jpeg is not None and vision.frame_seq != last:
+                    last = vision.frame_seq
+                    yield (
+                        b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                        + str(len(jpeg)).encode()
+                        + b"\r\n\r\n"
+                        + jpeg
+                        + b"\r\n"
+                    )
+                await asyncio.sleep(1.0 / VIDEO_FPS)
+
+        return StreamingResponse(
+            frames(),
+            media_type="multipart/x-mixed-replace; boundary=frame",
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.websocket("/ws/operator")
     async def operator(ws: WebSocket) -> None:
@@ -254,8 +406,9 @@ def create_app(
                     handle_text(client_id, text)
         finally:
             hub.remove(client_id)
+            video_nonces.pop(client_id, None)
             if session.disconnect(client_id):
-                link.send_zero()
+                end_gesture()
 
     return app
 

@@ -9119,7 +9119,7 @@ Mỗi task còn lại theo quy trình plan.md §5. Work order do Sonnet điền 
 - Work order: _(Sonnet điền)_
 
 ### T20 — App server: mode, heartbeat, vision_link, /video
-- Trạng thái: TODO · Plan: V1 · Phụ thuộc: T18, T19
+- Trạng thái: CODED (chưa đối chứng Sonnet; pytest app/server 172 qua gồm test_gesture.py; link thật tới Jetson chưa chạy) · Plan: V1 · Phụ thuộc: T18, T19
 - Spec: FR-03, FR-13, SAF-02, SAF-03, SAF-07, SAF-09, PROTO-2, PROTO-3, PROTO-1
 - Việc: `control.py` (mode chỉ driver, phải arm, tắt khi disarm/`Space`/mất driver), `robot_link.py` (gửi `mode`, `hb` 5 Hz), `vision_link.py`, `main.py` (`/video`, `state.vision`, chuyển tiếp lệnh nhân viên chỉ khi là driver). `SPEED_SCALE` không đổi.
 - Đạt khi: test server qua; rút link → robot chặn ≤ 0.5 s trên mô phỏng.
