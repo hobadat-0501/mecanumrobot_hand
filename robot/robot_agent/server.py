@@ -1,6 +1,8 @@
 """Robot WebSocket server (PROTO-2): ws://<ROBOT_BIND_HOST>:<ROBOT_BIND_PORT>/ws.
 
-Down: only {"t":"cmd_vel","seq","vx","vy","wz"} (wire units) reaches the writer (FR-03).
+Down: {"t":"cmd_vel","seq","vx","vy","wz"} (wire units) is the only motion command (FR-03). Two
+session commands carry no velocity (D-10): {"t":"mode","seq","gesture"} and {"t":"hb","seq"}; they
+are honoured only when a CmdArbiter is attached.
 Up: JSON "state" at most 50 Hz, and binary "scan" frames at most 10 Hz (see build_scan_frame).
 The robot knows nothing about the app-side scale factor.
 """
@@ -25,6 +27,8 @@ MAX_STATE_HZ = 50.0
 MAX_MESSAGE_BYTES = 1024
 CLOSE_REPLACED = 4000
 _CMD_KEYS = frozenset(("t", "seq", "vx", "vy", "wz"))
+_MODE_KEYS = frozenset(("t", "seq", "gesture"))
+_HB_KEYS = frozenset(("t", "seq"))
 
 # Binary scan frame (PROTO-2), little-endian, defined only here (the client mirrors it in
 # protocol.ts): header `type u8, ver u8, seq u32, t_mono_ms u64` (14 bytes), then SCAN_BINS x u16
@@ -74,6 +78,24 @@ def parse_cmd_vel(data: Any) -> tuple[int, float, float, float] | None:
     return seq, data["vx"], data["vy"], data["wz"]
 
 
+def _int_seq(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def parse_session(data: Any) -> tuple[str, int, bool] | None:
+    """Return ("mode", seq, gesture) or ("hb", seq, False) for a well-formed session message."""
+    if not isinstance(data, dict):
+        return None
+    kind = data.get("t")
+    if kind == "mode" and set(data) == _MODE_KEYS:
+        if _int_seq(data["seq"]) and isinstance(data["gesture"], bool):
+            return "mode", data["seq"], data["gesture"]
+    elif kind == "hb" and set(data) == _HB_KEYS:
+        if _int_seq(data["seq"]):
+            return "hb", data["seq"], False
+    return None
+
+
 class RobotServer:
     def __init__(
         self,
@@ -84,16 +106,22 @@ class RobotServer:
         devices: Callable[[], dict[str, dict[str, Any]]],
         state_hz: float = MAX_STATE_HZ,
         lidar: Any = None,
+        arbiter: Any = None,
     ) -> None:
         """writer: CmdVelWriter. stm: object with latest/latest_aux (may return None).
         devices: returns {"stm": {...}, "lidar": {...}} health dicts from the supervisors.
-        lidar: optional object whose `latest` is a LidarScan or None; enables scan frames."""
+        lidar: optional object whose `latest` is a LidarScan or None; enables scan frames.
+        arbiter: optional CmdArbiter wrapping `writer`; when given, app commands, link loss and
+        the mode/hb session messages go through it (gesture mode)."""
         if not token:
             raise ValueError("link token must not be empty")
         if not 0.0 < state_hz <= MAX_STATE_HZ:
             raise ValueError(f"state_hz must be in (0, {MAX_STATE_HZ}]")
         self._expected = ("Bearer " + token).encode("utf-8")
         self.writer = writer
+        self._arbiter = arbiter
+        self._last_mode_seq: int | None = None
+        self._last_hb_seq: int | None = None
         self._stm = stm
         self._devices = devices
         self._lidar = lidar
@@ -146,12 +174,21 @@ class RobotServer:
 
     # ---- one connection ----
 
+    @property
+    def sink(self):
+        """Where cmd_vel/clear go: the arbiter when present, else the writer."""
+        return self._arbiter if self._arbiter is not None else self.writer
+
     def _claim(self, conn: Any) -> None:
         """The newest valid connection replaces the old one (SAF-07)."""
         old, self._current = self._current, conn
         self._last_cmd_seq = None
+        self._last_mode_seq = None
+        self._last_hb_seq = None
+        if self._arbiter is not None:
+            self._arbiter.set_mode(False, reason="link")  # a new link never inherits the mode
         if old is not None:
-            self.writer.clear()  # SAF-03c: the replaced link's command must not survive
+            self.sink.clear()  # SAF-03c: the replaced link's command must not survive
             closer = asyncio.ensure_future(old.close(CLOSE_REPLACED, "replaced"))
             self._closers.add(closer)
             closer.add_done_callback(self._closers.discard)
@@ -160,7 +197,7 @@ class RobotServer:
         if self._current is conn:
             self._current = None
             self._last_cmd_seq = None
-            self.writer.clear()  # SAF-03c: link lost -> writer returns to zero
+            self.sink.clear()  # SAF-03c: link lost -> writer returns to zero (and mode off)
 
     async def _handler(self, conn: Any) -> None:
         self._claim(conn)
@@ -179,17 +216,39 @@ class RobotServer:
 
     def _on_message(self, message: str | bytes) -> None:
         command = None
+        session = None
         if isinstance(message, str):
             try:
-                command = parse_cmd_vel(json.loads(message))
+                data = json.loads(message)
+                command = parse_cmd_vel(data)
+                if command is None and self._arbiter is not None:
+                    session = parse_session(data)
             except (ValueError, RecursionError):
                 command = None
+        if session is not None:
+            self._on_session(*session)
+            return
         if command is None:  # binary frame, bad JSON, or anything but a valid cmd_vel
             self.ignored += 1
             return
         seq, vx, vy, wz = command
-        if self.writer.set_cmd_vel(vx, vy, wz):
+        if self.sink.set_cmd_vel(vx, vy, wz):
             self._last_cmd_seq = seq
+
+    def _on_session(self, kind: str, seq: int, gesture: bool) -> None:
+        # Old or repeated seq is dropped, so a delayed "mode on" cannot undo a later "off".
+        if kind == "mode":
+            if self._last_mode_seq is not None and seq <= self._last_mode_seq:
+                self.ignored += 1
+                return
+            self._last_mode_seq = seq
+            self._arbiter.set_mode(gesture, reason="web")
+        else:
+            if self._last_hb_seq is not None and seq <= self._last_hb_seq:
+                self.ignored += 1
+                return
+            self._last_hb_seq = seq
+            self._arbiter.heartbeat()
 
     # ---- state out ----
 
@@ -219,6 +278,8 @@ class RobotServer:
                 },
             },
         }
+        if self._arbiter is not None:
+            state.update(self._arbiter.report())
         if sample is not None:
             state["vel"] = {"vx": sample.vx_mps, "vy": sample.vy_mps, "wz": sample.wz_radps}
             state["imu"] = {

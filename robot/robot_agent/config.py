@@ -5,6 +5,7 @@ ROBOT_LINK_TOKEN refuses to start (SAF-07). Motion is off unless explicitly enab
 """
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -35,6 +36,19 @@ class Config:
     bind_host: str
     bind_port: int
     link_token: str
+    # Gesture mode (v7, D-09..D-11). Vision motion is off unless explicitly enabled (SAF-02).
+    vision_motion_enabled: bool = False
+    vision_socket: str = "/run/mecanum/vision.sock"
+    footprint_x_m: float = 0.40  # ROBOT_FOOTPRINT, length along x (PHY-8)
+    footprint_y_m: float = 0.40  # ROBOT_FOOTPRINT, width along y
+    lidar_x_m: float = 0.10  # LIDAR_POSE: forward of the robot centre
+    lidar_y_m: float = 0.0
+    camera_x_m: float = 0.20  # CAMERA_POSE (used by the vision agent)
+    camera_z_m: float = 0.35
+    camera_pitch_deg: float = 20.0
+    gate_t_check_s: float = 0.5  # LiDAR gate look-ahead (SAF-11)
+    gate_margin_m: float = 0.15
+    gate_scan_max_age_s: float = 0.3
 
 
 def _text(env: Mapping[str, str], name: str, default: str) -> str:
@@ -66,6 +80,19 @@ def _integer(env: Mapping[str, str], name: str, default: int, low: int, high: in
     return value
 
 
+def _real(env: Mapping[str, str], name: str, default: float, low: float, high: float) -> float:
+    raw = env.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ConfigError(f"{name} must be a number") from None
+    if not math.isfinite(value) or not low <= value <= high:
+        raise ConfigError(f"{name} must be between {low:g} and {high:g}")
+    return value
+
+
 def load_config(
     environ: Mapping[str, str] | None = None, *, env_file: Path | str = ENV_FILE
 ) -> Config:
@@ -88,4 +115,16 @@ def load_config(
         bind_host=host,
         bind_port=_integer(environ, "ROBOT_BIND_PORT", 8765, 1, 65535),
         link_token=token,
+        vision_motion_enabled=_flag(environ, "VISION_MOTION_ENABLED"),
+        vision_socket=_text(environ, "VISION_SOCKET", "/run/mecanum/vision.sock"),
+        footprint_x_m=_real(environ, "ROBOT_FOOTPRINT_X_M", 0.40, 0.05, 2.0),
+        footprint_y_m=_real(environ, "ROBOT_FOOTPRINT_Y_M", 0.40, 0.05, 2.0),
+        lidar_x_m=_real(environ, "LIDAR_POSE_X_M", 0.10, -1.0, 1.0),
+        lidar_y_m=_real(environ, "LIDAR_POSE_Y_M", 0.0, -1.0, 1.0),
+        camera_x_m=_real(environ, "CAMERA_POSE_X_M", 0.20, -1.0, 1.0),
+        camera_z_m=_real(environ, "CAMERA_POSE_Z_M", 0.35, 0.0, 2.0),
+        camera_pitch_deg=_real(environ, "CAMERA_POSE_PITCH_DEG", 20.0, -90.0, 90.0),
+        gate_t_check_s=_real(environ, "LIDAR_GATE_T_CHECK_S", 0.5, 0.05, 5.0),
+        gate_margin_m=_real(environ, "LIDAR_GATE_MARGIN_M", 0.15, 0.0, 1.0),
+        gate_scan_max_age_s=_real(environ, "LIDAR_GATE_SCAN_MAX_AGE_S", 0.3, 0.05, 5.0),
     )

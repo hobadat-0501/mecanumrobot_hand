@@ -17,7 +17,8 @@ from typing import Any
 
 from . import hardware
 from .config import Config, ConfigError, load_config
-from .drive import CmdVelWriter
+from .drive import CmdArbiter, CmdVelWriter, LidarGate
+from .local_link import VisionLink, arbiter_loop
 from .server import RobotServer
 from .sim import SimulatedLidar, SimulatedStm32
 
@@ -204,9 +205,23 @@ async def run(config: Config) -> None:
 
     stm, lidar = build_devices(config)
     writer = CmdVelWriter(stm, motion_enabled=config.motion_enabled)
+    gate = LidarGate(
+        footprint_x_m=config.footprint_x_m,
+        footprint_y_m=config.footprint_y_m,
+        lidar_x_m=config.lidar_x_m,
+        lidar_y_m=config.lidar_y_m,
+        t_check_s=config.gate_t_check_s,
+        margin_m=config.gate_margin_m,
+        scan_max_age_s=config.gate_scan_max_age_s,
+    )
+    arbiter = CmdArbiter(
+        writer, lidar=lidar, gate=gate, vision_enabled=config.vision_motion_enabled
+    )
+    vision_link = VisionLink(arbiter, stm, config.vision_socket)
     server = RobotServer(
         token=config.link_token,
         writer=writer,
+        arbiter=arbiter,
         stm=stm,
         devices=lambda: {"stm": stm.health(), "lidar": lidar.health()},
         lidar=lidar,
@@ -216,8 +231,17 @@ async def run(config: Config) -> None:
     if config.simulate:
         log.warning("ROBOT_SIMULATE is true: using simulated STM32 and LiDAR")
 
+    if not config.vision_motion_enabled:
+        log.warning("VISION_MOTION_ENABLED is false: vision commands are never forwarded")
+
     writer.start()
     device_tasks = [asyncio.ensure_future(stm.run()), asyncio.ensure_future(lidar.run())]
+    device_tasks.append(asyncio.ensure_future(arbiter_loop(arbiter)))
+    try:
+        await vision_link.start()
+        device_tasks.append(asyncio.ensure_future(vision_link.run_status()))
+    except OSError as exc:  # no vision agent possible here (e.g. no AF_UNIX): manual mode still works
+        log.warning("vision link unavailable: %s", exc)
     bind_task = asyncio.ensure_future(
         bind_with_retry(server, config.bind_host, config.bind_port)
     )
@@ -228,6 +252,7 @@ async def run(config: Config) -> None:
         bind_task.cancel()
         await asyncio.gather(bind_task, return_exceptions=True)
         await server.close()  # each open connection clears the writer
+        vision_link.stop()
         # The final zero goes out while the STM32 source is still running.
         if not await asyncio.to_thread(writer.stop):
             log.error("final zero velocity could not be written")
