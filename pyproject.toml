@@ -26,6 +26,11 @@ camera = [
     "numpy>=2.0,<3",
     "primesense>=2.2.0.30.post5",
 ]
+vision = [
+    "websockets>=14,<17",
+    "python-dotenv>=1,<2",
+    "numpy>=2.0,<3",
+]
 test = [
     "pytest>=8,<10",
     "pytest-asyncio>=0.23,<2",
@@ -33,10 +38,11 @@ test = [
 ]
 
 [tool.setuptools]
-packages = ["robot_agent", "app_server"]
+packages = ["robot_agent", "vision_agent", "app_server"]
 
 [tool.setuptools.package-dir]
 robot_agent = "robot/robot_agent"
+vision_agent = "robot/vision_agent"
 app_server = "app/server/app_server"
 
 [tool.pytest.ini_options]

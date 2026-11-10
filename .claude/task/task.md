@@ -9112,7 +9112,7 @@ Mỗi task còn lại theo quy trình plan.md §5. Work order do Sonnet điền 
 - Work order: _(Sonnet điền)_
 
 ### T19 — Vision agent khung + PROTO-3 + mô phỏng
-- Trạng thái: TODO · Plan: V1 · Phụ thuộc: T18
+- Trạng thái: CODED (chưa đối chứng Sonnet; pytest robot 178 qua; vòng PROTO-4 thật chỉ chạy được trên Jetson) · Plan: V1 · Phụ thuộc: T18
 - Spec: VIS-01, PROTO-3, PROTO-4, NFR-04, NFR-08
 - Việc: gói `robot/vision_agent/` (`__main__`, `config`, `server`, `pipeline`, `gesture_fsm`), state machine chỉ gửi 0, `VISION_SIMULATE`, WS `:8766`, extras `vision` trong `pyproject.toml`.
 - Đạt khi: test FSM qua không cần GPU; mô phỏng phát video và chuỗi trạng thái giả.
