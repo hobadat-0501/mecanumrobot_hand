@@ -9126,7 +9126,7 @@ Mỗi task còn lại theo quy trình plan.md §5. Work order do Sonnet điền 
 - Work order: _(Sonnet điền)_
 
 ### T21 — Client: trang /gesture
-- Trạng thái: TODO · Plan: V1 · Phụ thuộc: T20
+- Trạng thái: CODED (chưa đối chứng Sonnet; tsc, eslint, vitest 163, build qua; chưa thử với app server + Jetson thật) · Plan: V1 · Phụ thuộc: T20
 - Spec: FR-01, FR-13, SAF-03, NFR-08
 - Việc: `app/gesture/page.tsx`, mở rộng `protocol.ts`/`store.ts`/`control.ts` (mode, vision; `Space` gửi kèm `mode{false}`). Đọc `app/client/node_modules/next/dist/docs/` trước.
 - Đạt khi: bật/tắt chế độ từ web trên mô phỏng; tsc, eslint, vitest, build qua.

@@ -19,7 +19,27 @@ export type ClientMessage =
       src: CmdSrc;
     }
   | { t: "arm"; on: boolean }
+  | { t: "mode"; gesture: boolean }
   | { t: "odom_reset" };
+
+/** Chế độ điều khiển của phiên: tay hoặc cử chỉ (D-09). Không mang vận tốc. */
+export type SessionMode = "manual" | "gesture";
+
+/** Trạng thái vision agent đã lọc ở app server (chỉ trường hiển thị, không có vận tốc). */
+export interface VisionInfo {
+  link: boolean;
+  enabled: boolean;
+  state: {
+    mode?: boolean;
+    state?: string;
+    user?: string | null;
+    gesture?: string | null;
+    guide?: string | null;
+    fps?: number;
+    cmd_active?: boolean;
+  } | null;
+  result: LooseRecord | null;
+}
 
 export interface Imu {
   ax: number;
@@ -36,7 +56,17 @@ export type LooseRecord = { [key: string]: unknown };
 export interface StateMsg {
   t: "state";
   link: { robot: boolean; rtt_ms: number | null };
-  session: { armed: boolean; has_driver: boolean; role: Role | null };
+  session: {
+    armed: boolean;
+    has_driver: boolean;
+    role: Role | null;
+    mode?: SessionMode;
+    /** Mã dùng một lần để xin cookie xem video (chỉ gửi cho người lái). */
+    video_nonce?: string;
+  };
+  /** Báo cáo của robot về chế độ cử chỉ và cổng LiDAR; null khi không có. */
+  gesture?: LooseRecord | null;
+  vision?: VisionInfo;
   vel: BodyVel | null;
   pose: Pose;
   cmd: BodyVel;
@@ -108,6 +138,15 @@ export interface LocationLike {
   protocol: string;
   hostname: string;
 }
+
+/** Địa chỉ HTTP của app server suy từ địa chỉ WebSocket (cùng host, cổng). */
+export function httpBaseFromWs(wsUrl: string): string {
+  const u = new URL(wsUrl);
+  return `${u.protocol === "wss:" ? "https" : "http"}://${u.host}`;
+}
+
+export const VIDEO_PATH = "/video";
+export const VIDEO_SESSION_PATH = "/video/session";
 
 export const WS_PORT = 8000;
 export const WS_PATH = "/ws/operator";

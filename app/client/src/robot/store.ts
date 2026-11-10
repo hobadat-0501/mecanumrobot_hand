@@ -17,12 +17,15 @@ import type {
   Speed,
 } from "./control";
 import {
+  VIDEO_PATH,
+  VIDEO_SESSION_PATH,
   decodeScanFrame,
   encodeMessage,
+  httpBaseFromWs,
   parseServerMessage,
   resolveWsUrl,
 } from "./protocol";
-import type { ClientMessage, Role, ScanFrame, StateMsg } from "./protocol";
+import type { ClientMessage, Role, ScanFrame, SessionMode, StateMsg } from "./protocol";
 import {
   HistoryBuffer,
   LatencyTracker,
@@ -56,6 +59,10 @@ export interface ShellSnapshot {
   robotLink: boolean;
   armed: boolean;
   role: Role | null;
+  /** Chế độ của phiên (D-09): "gesture" chỉ khi app server báo. */
+  mode: SessionMode;
+  /** Đã có cookie xem video (POST /video/session thành công trên kết nối này). */
+  videoReady: boolean;
   hasCode: boolean;
   source: Source;
   speed: Speed;
@@ -69,6 +76,8 @@ const INITIAL_SHELL: ShellSnapshot = {
   robotLink: false,
   armed: false,
   role: null,
+  mode: "manual",
+  videoReady: false,
   hasCode: false,
   source: "idle",
   speed: DEFAULT_SPEED,
@@ -89,6 +98,8 @@ let operatorCode = "";
 let telemetry: StateMsg | null = null;
 let telemetryAt = Number.NEGATIVE_INFINITY;
 let shell: ShellSnapshot = INITIAL_SHELL;
+let videoReady = false;
+let videoNonceUsed: string | null = null;
 /** Quỹ đạo gần đây (FR-12): vòng đệm ngoài React, trang vẽ bằng canvas. */
 export const trajectory = new HistoryBuffer();
 const latency = new LatencyTracker();
@@ -204,6 +215,8 @@ function publishShell(): void {
     robotLink: telemetry?.link.robot ?? false,
     armed: telemetry?.session.armed ?? false,
     role: telemetry?.session.role ?? null,
+    mode: telemetry?.session.mode === "gesture" ? "gesture" : "manual",
+    videoReady,
     hasCode: operatorCode !== "",
     source: arbiter.source,
     speed: arbiter.speed,
@@ -216,6 +229,8 @@ function publishShell(): void {
     next.robotLink === shell.robotLink &&
     next.armed === shell.armed &&
     next.role === shell.role &&
+    next.mode === shell.mode &&
+    next.videoReady === shell.videoReady &&
     next.hasCode === shell.hasCode &&
     next.source === shell.source &&
     next.speed === shell.speed &&
@@ -323,9 +338,43 @@ export function haltAll(reason: EndReason): void {
 export function emergencyStop(): void {
   arbiter.releaseAll("stop");
   sendZeroNow();
+  send({ t: "mode", gesture: false });
   send({ t: "arm", on: false });
   syncTimer();
   publishShell();
+}
+
+/** Bật/tắt chế độ cử chỉ (D-09). Chỉ người lái đã arm mới bật được; server là bên quyết định. */
+export function setGestureMode(on: boolean): void {
+  if (on && !canDrive()) return;
+  send({ t: "mode", gesture: on });
+}
+
+/** Địa chỉ luồng video MJPEG; null khi chưa có cookie xem video. */
+export function getVideoUrl(): string | null {
+  if (!videoReady || typeof window === "undefined") return null;
+  return httpBaseFromWs(resolveWsUrl(process.env.NEXT_PUBLIC_APP_WS_URL, window.location)) + VIDEO_PATH;
+}
+
+/** Đổi mã dùng một lần (nhận sau hello hợp lệ) lấy cookie xem video; cookie không bao giờ qua WebSocket. */
+function claimVideoSession(nonce: string): void {
+  if (nonce === videoNonceUsed) return;
+  videoNonceUsed = nonce;
+  const base = httpBaseFromWs(resolveWsUrl(process.env.NEXT_PUBLIC_APP_WS_URL, window.location));
+  fetch(base + VIDEO_SESSION_PATH, {
+    method: "POST",
+    credentials: "include",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ nonce }),
+  })
+    .then((res) => {
+      videoReady = res.ok;
+      publishShell();
+    })
+    .catch(() => {
+      videoReady = false;
+      publishShell();
+    });
 }
 
 export function setArmed(on: boolean): void {
@@ -466,6 +515,8 @@ function connect(): void {
     trajectory.push(msg.pose.x, msg.pose.y, msg.pose.theta);
     latency.ack(msg.last_cmd_seq, telemetryAt);
     notifyTelemetry();
+    const nonce = msg.session.video_nonce;
+    if (typeof nonce === "string" && nonce !== "") claimVideoSession(nonce);
     if (couldDrive && !canDrive()) haltAll("disarmed");
     else publishShell();
   };
@@ -474,6 +525,8 @@ function connect(): void {
     ws = null;
     conn = "closed";
     telemetry = null;
+    videoReady = false;
+    videoNonceUsed = null;
     scan = null;
     scanRate.clear();
     for (const listener of scanListeners) listener();
