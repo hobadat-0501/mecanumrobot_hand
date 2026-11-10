@@ -9085,6 +9085,102 @@ Trạng thái: `TODO → ORDERED → CODED → PASS → MERGED` hoặc `BLOCKED`
 - Đạt khi: người dùng xác nhận kết quả; giả định sai được đưa về spec.md để sửa.
 - Work order: _(Sonnet điền)_
 
+## V — Chế độ Cử chỉ (v7, nguồn: [robot_plan_final_v7.md](../../robot_plan_final_v7.md))
+
+Mỗi task còn lại theo quy trình plan.md §5. Work order do Sonnet điền trước khi viết code. Từ T24 trở đi cần người dùng có mặt cạnh robot.
+
+### T16 — Ghi quyết định v7 vào repo
+- Trạng thái: CODED · Plan: V0 · Phụ thuộc: không
+- Spec: NFR-07
+- Việc: sửa `CLAUDE.md`, `spec.md` (FR-01, FR-03, SAF-01..04, PROTO-2; thêm FR-13..15, SAF-09..12, VIS-01..05, PROTO-3, PROTO-4, PHY-8, NFR-08..10, A-6), `plan.md` (D-09..D-12, cấu trúc, giai đoạn V0–V7), `task.md` (T16–T28); đối chứng chéo ba file.
+- Đạt khi: mọi mã spec mới có task, mọi task trỏ tới mã và giai đoạn tồn tại; Sonnet đối chứng đạt.
+- Work order: _(không cần, chỉ tài liệu)_
+
+### T17 — Kiểm tra phần cứng V0 (cần người dùng)
+- Trạng thái: TODO · Plan: V0 · Phụ thuộc: T16, Jetson online
+- Spec: SAF-08, SAF-11, PHY-8, A-6
+- Việc: `cat /etc/nv_tegra_release` (JetPack, Python 3.10, TensorRT); chạy `AstraSSource` (RGB + depth 30 fps, registration, ngược sáng); quay thử tư thế xác thực, vùng cử chỉ, cảnh bám; **thử SAF-08** (nhấc bánh); kiểm tra bánh có nhô ra ngoài khung 40 × 40; kiểm tra LiDAR không tự che.
+- Đạt khi: người dùng xác nhận; giả định sai đưa về spec.md.
+- Work order: _(Sonnet điền)_
+
+### T18 — Robot agent: ModeGuard, CmdArbiter, cổng LiDAR, PROTO-4
+- Trạng thái: CODED (chưa đối chứng Sonnet, chưa merge; pytest robot 150 qua, test unix socket bị skip trên Windows, chạy thật trên Jetson ở T17/T24) · Plan: V1 · Phụ thuộc: T16
+- Ghi chú: nguồn quét LiDAR cho cổng ở chế độ FOLLOW (cổng đọc `lidar.latest` ngay trong robot agent nên không cần gửi scan qua PROTO-4) — nếu T26 cần scan ở vision agent thì thêm vào PROTO-4 ở T26. Agent vision phải bind đường dẫn datagram riêng để robot trả `robot_status`.
+- Spec: SAF-01, SAF-02, SAF-03, SAF-04, SAF-09, SAF-10, SAF-11, PROTO-2, PROTO-4, PHY-8, FR-03, NFR-04
+- Việc: `drive.py` thêm `ModeGuard`, `CmdArbiter`, cổng LiDAR; `server.py` nhận `mode`/`hb` và thêm `mode`, `src`, `vision`, `lidar_gate` vào `state`; `local_link.py` (unix socket); `config.py` (`VISION_MOTION_ENABLED` mặc định `false`, `VISION_SOCKET`, `ROBOT_FOOTPRINT`, `LIDAR_POSE`, `CAMERA_POSE`, ngưỡng cổng); test trong `robot/tests/test_vision.py`.
+- Đạt khi: test qua cho arbiter mọi ca, ModeGuard (hb 0.5 s/3 s), cổng LiDAR (không đối xứng quanh LiDAR, scan cũ, lệnh 0 qua); không đổi hành vi khi chế độ tắt.
+- Work order: _(Sonnet điền)_
+
+### T19 — Vision agent khung + PROTO-3 + mô phỏng
+- Trạng thái: TODO · Plan: V1 · Phụ thuộc: T18
+- Spec: VIS-01, PROTO-3, PROTO-4, NFR-04, NFR-08
+- Việc: gói `robot/vision_agent/` (`__main__`, `config`, `server`, `pipeline`, `gesture_fsm`), state machine chỉ gửi 0, `VISION_SIMULATE`, WS `:8766`, extras `vision` trong `pyproject.toml`.
+- Đạt khi: test FSM qua không cần GPU; mô phỏng phát video và chuỗi trạng thái giả.
+- Work order: _(Sonnet điền)_
+
+### T20 — App server: mode, heartbeat, vision_link, /video
+- Trạng thái: TODO · Plan: V1 · Phụ thuộc: T18, T19
+- Spec: FR-03, FR-13, SAF-02, SAF-03, SAF-07, SAF-09, PROTO-2, PROTO-3, PROTO-1
+- Việc: `control.py` (mode chỉ driver, phải arm, tắt khi disarm/`Space`/mất driver), `robot_link.py` (gửi `mode`, `hb` 5 Hz), `vision_link.py`, `main.py` (`/video`, `state.vision`, chuyển tiếp lệnh nhân viên chỉ khi là driver). `SPEED_SCALE` không đổi.
+- Đạt khi: test server qua; rút link → robot chặn ≤ 0.5 s trên mô phỏng.
+- Work order: _(Sonnet điền)_
+
+### T21 — Client: trang /gesture
+- Trạng thái: TODO · Plan: V1 · Phụ thuộc: T20
+- Spec: FR-01, FR-13, SAF-03, NFR-08
+- Việc: `app/gesture/page.tsx`, mở rộng `protocol.ts`/`store.ts`/`control.ts` (mode, vision; `Space` gửi kèm `mode{false}`). Đọc `app/client/node_modules/next/dist/docs/` trước.
+- Đạt khi: bật/tắt chế độ từ web trên mô phỏng; tsc, eslint, vitest, build qua.
+- Work order: _(Sonnet điền)_
+
+### T22 — Nhân viên: store, trang /gesture/staff, đăng ký (khung)
+- Trạng thái: TODO · Plan: V2 · Phụ thuộc: T20, T21
+- Spec: FR-01, FR-14, FR-15, SAF-12, NFR-09, PROTO-3
+- Việc: `store.py` (SQLite `employees`, `face_samples` mã hóa, `events`), `enroll.py` (phiên, chưa có model thật), lệnh PROTO-3, `app/gesture/staff/page.tsx` (thêm/sửa/xóa, bật/tắt quyền, xác nhận xóa).
+- Đạt khi: CRUD chạy trên web; tắt quyền người đang điều khiển → LOCKED; web không nhận embedding.
+- Work order: _(Sonnet điền)_
+
+### T23 — Dữ liệu và huấn luyện: người, cử chỉ
+- Trạng thái: TODO · Plan: V2 · Phụ thuộc: T17, T19
+- Spec: VIS-04, VIS-05
+- Việc: `record.py`, `training/`, quy ước gắn nhãn, huấn luyện YOLO người (thân dưới) và model cử chỉ, ONNX → TensorRT FP16.
+- Đạt khi: đạt chỉ số v7 §16 cho cử chỉ và phát hiện người trên người ngoài tập huấn luyện.
+- Work order: _(Sonnet điền)_
+
+### T24 — GESTURE chạy thật (cần người dùng)
+- Trạng thái: TODO · Plan: V3 · Phụ thuộc: T17, T18, T22, T23
+- Spec: VIS-01, VIS-04, SAF-11, NFR-02, NFR-10
+- Việc: nhấc bánh chạy chậm trước, rồi trên mặt đất; đi ngang, chặn tiến theo depth, cổng LiDAR, rút mạng, `Space`.
+- Đạt khi: người dùng xác nhận; số đo ghi vào task.
+- Work order: _(Sonnet điền)_
+
+### T25 — Khuôn mặt: phát hiện, nhận diện, chống giả mạo, đăng ký
+- Trạng thái: TODO · Plan: V4 · Phụ thuộc: T22, T24
+- Spec: VIS-02, VIS-03, FR-15, SAF-12, NFR-09
+- Việc: `face.py`, huấn luyện (kèm baseline), chống giả mạo, luồng đăng ký, LOCKED → BIND.
+- Đạt khi: FAR/FRR và giả mạo đạt chỉ số; đăng ký ≤ 1 phút; không lưu mẫu trùng người khác.
+- Work order: _(Sonnet điền)_
+
+### T26 — FOLLOW: BIND, BIND-BACK, bám, HOLD
+- Trạng thái: TODO · Plan: V5 · Phụ thuộc: T25
+- Spec: VIS-01, VIS-05, SAF-12
+- Việc: `person.py`, `body.py`, `legs.py`, bù xoay gyro, PD theo khoảng cách (depth + cụm chân LiDAR), HOLD, thoát sau lưng.
+- Đạt khi: bám đúng người, bám kịp người đi nhanh, vào HOLD khi chen ngang hoặc mất dấu.
+- Work order: _(Sonnet điền)_
+
+### T27 — Hiệu chỉnh và kiểm thử an toàn tổng thể (cần người dùng)
+- Trạng thái: TODO · Plan: V5–V6 · Phụ thuộc: T26
+- Spec: VIS-05, NFR-02, NFR-10
+- Việc: bám ngoài khung bằng LiDAR (nếu cần), ReID (nếu cần), hiệu chỉnh độ lợi, báo cáo chỉ số v7 §16.
+- Đạt khi: báo cáo mục §16 đạt; người dùng xác nhận.
+- Work order: _(Sonnet điền)_
+
+### T28 — Triển khai và phát hành
+- Trạng thái: TODO · Plan: V7 · Phụ thuộc: T27
+- Spec: NFR-07, NFR-10
+- Việc: `deploy/vision-agent.service`, tài liệu vận hành, release theo git-flow.
+- Đạt khi: chạy ổn định nhiều giờ.
+- Work order: _(Sonnet điền)_
+
 ## Ma trận Plan → Task
 
 | Giai đoạn | Task |
@@ -9095,6 +9191,13 @@ Trạng thái: `TODO → ORDERED → CODED → PASS → MERGED` hoặc `BLOCKED`
 | P3 | T07, T08 |
 | P4 | T09, T10, T11, T12, T13 |
 | P5 | T14, T15 |
+| V0 | T16, T17 |
+| V1 | T18, T19, T20, T21 |
+| V2 | T22, T23 |
+| V3 | T24 |
+| V4 | T25 |
+| V5–V6 | T26, T27 |
+| V7 | T28 |
 
 ## Thay đổi sau T14 (UI)
 
