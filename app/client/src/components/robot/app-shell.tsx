@@ -7,6 +7,7 @@
 import {
   Activity,
   Cpu,
+  Hand,
   KeyRound,
   LayoutDashboard,
   Move,
@@ -52,6 +53,7 @@ const NAV: readonly NavItem[] = [
   { href: "/kinematics/inverse", label: "Động học ngược", short: "Ngược", Icon: Waypoints },
   { href: "/dynamics", label: "Động lực học", short: "Lực", Icon: Activity },
   { href: "/lidar", label: "LiDAR", short: "LiDAR", Icon: Radar },
+  { href: "/gesture", label: "Cử chỉ", short: "Cử chỉ", Icon: Hand },
   { href: "/system", label: "Hệ thống", short: "Hệ thống", Icon: Cpu },
 ];
 

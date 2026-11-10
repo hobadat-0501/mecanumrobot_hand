@@ -228,3 +228,32 @@ describe("thống kê scan và tuổi dữ liệu", () => {
     expect(meter.rate(1000)).toBe(0);
   });
 });
+
+describe("T21: gesture protocol", () => {
+  it("httpBaseFromWs giữ host, cổng và đổi scheme", async () => {
+    const { httpBaseFromWs } = await import("./protocol");
+    expect(httpBaseFromWs("ws://100.119.83.63:8000/ws/operator")).toBe("http://100.119.83.63:8000");
+    expect(httpBaseFromWs("wss://x.example/ws/operator")).toBe("https://x.example");
+  });
+
+  it("tin mode không mang vận tốc", async () => {
+    const { encodeMessage } = await import("./protocol");
+    const text = encodeMessage({ t: "mode", gesture: true });
+    expect(JSON.parse(text)).toEqual({ t: "mode", gesture: true });
+  });
+
+  it("parseServerMessage nhận state có mode và vision", async () => {
+    const { parseServerMessage } = await import("./protocol");
+    const state = {
+      t: "state",
+      link: { robot: true, rtt_ms: 5 },
+      session: { armed: true, has_driver: true, role: "driver", mode: "gesture" },
+      pose: { x: 0, y: 0, theta: 0 },
+      cmd: { vx: 0, vy: 0, wz: 0 },
+      vision: { link: true, enabled: true, state: { state: "GESTURE" }, result: null },
+    };
+    const msg = parseServerMessage(JSON.stringify(state));
+    expect(msg?.session.mode).toBe("gesture");
+    expect(msg?.vision?.state?.state).toBe("GESTURE");
+  });
+});
