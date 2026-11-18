@@ -9098,7 +9098,7 @@ Mỗi task còn lại theo quy trình plan.md §5. Work order do Sonnet điền 
 
 ### T17 — Kiểm tra phần cứng V0 (cần người dùng)
 - Trạng thái: TODO · Plan: V0 · Phụ thuộc: T16, Jetson online
-- Spec: SAF-08, SAF-11, PHY-8, A-6
+- Spec: SAF-08, SAF-11, PHY-8, A-6, A-7
 - Việc: `cat /etc/nv_tegra_release` (JetPack, Python 3.10, TensorRT); chạy `AstraSSource` (RGB + depth 30 fps, registration, ngược sáng); quay thử tư thế xác thực, vùng cử chỉ, cảnh bám; **thử SAF-08** (nhấc bánh); kiểm tra bánh có nhô ra ngoài khung 40 × 40; kiểm tra LiDAR không tự che.
 - Đạt khi: người dùng xác nhận; giả định sai đưa về spec.md.
 - Work order: _(Sonnet điền)_
