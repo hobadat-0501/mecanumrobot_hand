@@ -9140,7 +9140,7 @@ Mỗi task còn lại theo quy trình plan.md §5. Work order do Sonnet điền 
 - Work order: _(Sonnet điền)_
 
 ### T23 — Dữ liệu và huấn luyện: người, cử chỉ
-- Trạng thái: TODO · Plan: V2 · Phụ thuộc: T17, T19
+- Trạng thái: CODED (khung: `record.py`, `training/{classes,split,download}.py`, test; chưa tải/thu dữ liệu, chưa huấn luyện, chờ robot và dữ liệu) · Plan: V2 · Phụ thuộc: T17, T19
 - Spec: VIS-04, VIS-05
 - Việc: `record.py`, `training/`, quy ước gắn nhãn, huấn luyện YOLO người (thân dưới) và model cử chỉ, ONNX → TensorRT FP16.
 - Đạt khi: đạt chỉ số v7 §16 cho cử chỉ và phát hiện người trên người ngoài tập huấn luyện.
