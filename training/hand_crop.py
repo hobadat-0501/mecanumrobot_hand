@@ -31,6 +31,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--src", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--model", type=Path, required=True)
+    ap.add_argument("--max-y", type=float, default=1.0, help="bỏ tay có tâm thấp hơn mức này (0 trên, 1 dưới)")
     ap.add_argument("--confidence", type=float, default=0.3)
     args = ap.parse_args(argv)
 
@@ -51,16 +52,21 @@ def main(argv: list[str] | None = None) -> int:
             (args.out / label).mkdir(parents=True, exist_ok=True)
             total = found = two_hands = 0
             sizes: list[int] = []
+            ys: list[float] = []
             for image_path in sorted(label_dir.glob("*.jpg")):
                 total += 1
                 rgb = np.asarray(Image.open(image_path).convert("RGB"))
                 result = detector.detect(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb))
                 if not result.hand_landmarks:
                     continue
-                found += 1
                 # Tay làm cử chỉ thường nằm cao hơn tay buông ở hông: lấy tay có y trung bình nhỏ nhất.
                 points = min(result.hand_landmarks, key=lambda hand: sum(p.y for p in hand))
                 two_hands += len(result.hand_landmarks) > 1
+                center_y = (min(p.y for p in points) + max(p.y for p in points)) / 2
+                ys.append(round(center_y, 2))
+                if center_y > args.max_y:
+                    continue
+                found += 1
                 height, width = rgb.shape[:2]
                 left, top, w, h = square_box([p.x for p in points], [p.y for p in points], width, height)
                 sizes.append(w)
@@ -70,6 +76,7 @@ def main(argv: list[str] | None = None) -> int:
                 "frames": total,
                 "with_hand": found,
                 "two_hands": two_hands,
+                "hand_y_p10_p50_p90": [float(v) for v in np.percentile(ys, [10, 50, 90]).round(2)] if ys else None,
                 "median_box_px": int(np.median(sizes)) if sizes else None,
             }
             print(label, report[label], flush=True)
